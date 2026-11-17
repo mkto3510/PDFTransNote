@@ -1,0 +1,138 @@
+/*
+ * PDF TransNote：pdf.js（v6.5.438）に合わせる部分の見た目
+ * ===========================================================================
+ * 1. 独自の部品（web/app/app.css）が使う変数（--tn-…）に，pdf.js の既定の見た目の値を入れる．
+ *    app.css は pdf.js の変数を直接使わず，ここだけを通す（pdf.js を更新したら，ここを直す）．
+ *    値の出どころ（vendor/pdfjs-6.5.438-dist/web/viewer.css）：
+ *      :root（ツールバー・入力欄・ボタン）と .dialog（ダイアログ）と .editToolbar（注釈のツールバー）．
+ *      .dialog と .editToolbar の変数はその要素の中でしか決まらないので，同じ値をここに写す．
+ * 2. pdf.js の要素に当てる見た目（保存ボタンの未保存の印，翻訳中のハイライト，設定ボタンのアイコン，
+ *    ハイライトの薄さ，左のパネルの Annotations のビュー）．
+ */
+
+:root {
+  /* 地と文字（.dialog の --dialog-bg-color，--text-primary-color，--text-secondary-color） */
+  --tn-bg: var(--background-color-canvas, light-dark(white, #1c1b22));
+  --tn-fg: var(--text-primary-color, light-dark(#15141a, #fbfbfe));
+  --tn-fg-weak: light-dark(#5b5b66, #cfcfd8);
+  /* 枠と影（注釈のツールバー .editToolbar と .dialog） */
+  --tn-border: var(--border-color-interactive, #8f8f9d);
+  --tn-separator: light-dark(#f0f0f4, #52525e);
+  --tn-shadow: 0 2px 14px 0 light-dark(rgb(58 57 68 / 0.2), #15141a);
+  --tn-radius: 6px;
+  /* 入力欄（.dialog の --textarea-*，--input-text-*） */
+  --tn-field-bg: light-dark(white, #42414d);
+  --tn-field-fg: var(--tn-fg);
+  --tn-field-border: var(--border-color-interactive, #8f8f9d);
+  /* ボタン（:root の --button-primary-*，--button-secondary-*） */
+  --tn-primary-bg: var(--button-primary-bg-color);
+  --tn-primary-fg: var(--button-primary-fg-color);
+  --tn-primary-hover-bg: var(--button-primary-hover-bg-color);
+  --tn-primary-active-bg: var(--button-primary-active-bg-color);
+  --tn-secondary-bg: var(--button-secondary-bg-color);
+  --tn-secondary-fg: var(--button-secondary-fg-color);
+  --tn-secondary-border: var(--button-secondary-border-color);
+  --tn-secondary-hover-bg: var(--button-secondary-hover-bg-color);
+  --tn-secondary-active-bg: var(--button-secondary-active-bg-color);
+  /* 強調・状態 */
+  --tn-accent: var(--color-accent-primary, light-dark(#0060df, #0df));
+  --tn-focus: var(--focus-ring-outline, 2px solid light-dark(#0060df, #0df));
+  --tn-error: light-dark(#c50042, #ff848b);
+  --tn-ok: light-dark(#017a40, #54ffbd);
+  /* 文字 */
+  --tn-font: message-box;
+  --tn-font-size: 13px;
+}
+
+/* ---- pdf.js の要素に当てる見た目 ---- */
+
+/* 保存していない変更があるときは，ツールバーの保存ボタンに印を付ける */
+.transnoteDirty #downloadButton::after {
+  content: "";
+  position: absolute;
+  inset-block-start: 4px;
+  inset-inline-end: 4px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background-color: #e22850;
+}
+.transnoteSaving #downloadButton {
+  opacity: 0.5;
+}
+
+/* 翻訳中のハイライト（ページの中に置く点線の枠がゆっくり明滅する．bridge.js の markBusy） */
+.pdfViewer .page .tnBusyMark {
+  position: absolute;
+  z-index: 3;
+  box-sizing: border-box;
+  pointer-events: none;
+  outline: 2px dashed var(--tn-accent);
+  outline-offset: 1px;
+  animation: tnPulse 1.2s ease-in-out infinite;
+}
+@keyframes tnPulse {
+  50% {
+    outline-color: transparent;
+  }
+}
+
+/*
+ * ハイライトの薄さ：Zotero の reader と同じく，色を不透明度 0.4・乗算で重ねる（src/pdf/page.js の _pushHighlight）．
+ * ファイルに書く色（不透明）は変えず，画面の見た目だけを変える．
+ * - このセッションのハイライト：pdf.js が SVG（描画の層）に fill-opacity: 1・乗算で描くのを，CSS で 0.4 にする．
+ * - ファイルにあったハイライト：canvas には描かせず（bridge.js の modifiedIds），canvas の上に独自の層で描く．
+ *   層ごと乗算・0.4 にするので，同じ色が重なっても濃くならない．
+ */
+.canvasWrapper svg.highlight:not(.free) {
+  fill-opacity: 0.4;
+}
+.pdfViewer .page .canvasWrapper .tnHighlightLayer {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  opacity: 0.4;
+  mix-blend-mode: multiply;
+
+  > div {
+    position: absolute;
+  }
+}
+
+/* 左のパネルの「Annotations」の選択肢のアイコン（pdf.js のハイライトのボタンの絵） */
+#viewsManager #viewsManagerSelectorOptions > #transnoteAnnotationsViewMenu::before {
+  -webkit-mask-image: url("/pdfjs/web/images/toolbarButton-editorHighlight.svg");
+  mask-image: url("/pdfjs/web/images/toolbarButton-editorHighlight.svg");
+}
+
+/* Annotations のビューのカードが使う変数（pdf.js の左のパネルの値．#viewsManager の中でしか決まらない） */
+#transnoteAnnotationsView {
+  --tn-card-fg: var(--views-text-color, var(--tn-fg));
+  --tn-card-weak: color-mix(in srgb, var(--views-text-color, var(--tn-fg)), transparent 35%);
+  --tn-card-bg: var(--button-bg, transparent);
+  --tn-card-hover-bg: var(--button-hover-bg, transparent);
+  --tn-card-selected: var(--button-focus-outline-color, var(--tn-accent));
+  --tn-card-accent: var(--indicator-color, var(--tn-accent));
+  --tn-card-error-bg: var(--status-warning-bg, transparent);
+  --tn-card-error-fg: var(--indicator-warning-color, var(--tn-error));
+}
+
+/* 左のパネルの開閉ボタンの印（翻訳の失敗．pdf.js の pdfSidebarNotification と同じ形で，色を変える） */
+#viewsManagerToggleButton.tnAlert::after {
+  position: absolute;
+  display: inline-block;
+  top: 2px;
+  inset-inline-end: 2px;
+  content: "";
+  background-color: var(--tn-error);
+  height: 9px;
+  width: 9px;
+  border-radius: 50%;
+}
+
+/* ツールバーの設定ボタン（toolbarButton の ::before にアイコンを入れる） */
+#transnoteGear::before {
+  -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='5.6' fill='none' stroke='black' stroke-width='2.6' stroke-dasharray='2.2 2.2'/%3E%3Ccircle cx='8' cy='8' r='4.2' fill='none' stroke='black' stroke-width='1.6'/%3E%3C/svg%3E");
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='5.6' fill='none' stroke='black' stroke-width='2.6' stroke-dasharray='2.2 2.2'/%3E%3Ccircle cx='8' cy='8' r='4.2' fill='none' stroke='black' stroke-width='1.6'/%3E%3C/svg%3E");
+}

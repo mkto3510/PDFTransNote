@@ -1,0 +1,527 @@
+/*
+ * PDF TransNote：独自の部品（ポップアップ，左のパネルの注釈のカード，知らせ，設定画面）の見た目
+ * ===========================================================================
+ * 色・文字・枠などは独自の変数（--tn-…）だけを使う．その中身は web/pdfjs/overrides.css が，
+ * pdf.js の既定の見た目（ツールバー，入力欄，ボタン，ダイアログ，注釈のツールバー）から入れる．
+ * viewer.html の CSP（style-src 'self'）に合わせ，インラインのスタイル属性は使わない（JS からの style は可）．
+ */
+
+.tnPopup,
+#tnToast,
+#tnSettings {
+  color: var(--tn-fg);
+  font: var(--tn-font);
+  font-size: var(--tn-font-size);
+  line-height: 1.5;
+}
+
+/* ---- 共通の部品 ---- */
+.tnBtn {
+  appearance: none;
+  min-height: 28px;
+  padding: 3px 14px;
+  font: inherit;
+  font-weight: 590;
+  color: var(--tn-secondary-fg);
+  background-color: var(--tn-secondary-bg);
+  border: 1px solid var(--tn-secondary-border);
+  border-radius: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+
+  &:hover:enabled {
+    background-color: var(--tn-secondary-hover-bg);
+  }
+  &:active:enabled {
+    background-color: var(--tn-secondary-active-bg);
+  }
+  &.primary {
+    color: var(--tn-primary-fg);
+    background-color: var(--tn-primary-bg);
+    border-color: var(--tn-primary-bg);
+
+    &:hover:enabled {
+      background-color: var(--tn-primary-hover-bg);
+      border-color: var(--tn-primary-hover-bg);
+    }
+    &:active:enabled {
+      background-color: var(--tn-primary-active-bg);
+    }
+  }
+  &.danger {
+    color: var(--tn-error);
+  }
+  &:focus-visible {
+    outline: var(--tn-focus);
+    outline-offset: 2px;
+  }
+  &:disabled {
+    opacity: 0.4;
+    cursor: default;
+  }
+}
+
+.tnField {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 8px;
+  font: inherit;
+  color: var(--tn-field-fg);
+  background-color: var(--tn-field-bg);
+  border: 1px solid var(--tn-field-border);
+  border-radius: 4px;
+  resize: vertical;
+
+  &:focus-visible {
+    outline: var(--tn-focus);
+    outline-offset: -1px;
+    border-color: transparent;
+  }
+  &::placeholder {
+    color: var(--tn-fg-weak);
+  }
+}
+
+.tnStatus {
+  color: var(--tn-fg-weak);
+  white-space: pre-wrap;
+
+  &:empty {
+    display: none;
+  }
+  &.error {
+    color: var(--tn-error);
+  }
+  &.ok {
+    color: var(--tn-ok);
+  }
+}
+
+.tnLink {
+  appearance: none;
+  padding: 0 2px;
+  font: inherit;
+  color: var(--tn-accent);
+  background: none;
+  border: none;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+/* ---- ポップアップ（縦に積む） ---- */
+.tnPopup {
+  position: fixed;
+  z-index: 100;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 340px;
+  max-width: calc(100vw - 16px);
+  padding: 10px;
+  background-color: var(--tn-bg);
+  border: 1px solid var(--tn-border);
+  border-radius: var(--tn-radius);
+  box-shadow: var(--tn-shadow);
+
+  &.offscreen {
+    visibility: hidden;
+  }
+  > .tnBtn {
+    width: 100%;
+  }
+}
+
+.tnColors {
+  display: flex;
+  justify-content: space-between;
+  gap: 4px;
+}
+.tnSwatch {
+  appearance: none;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid rgb(0 0 0 / 0.25);
+  border-radius: 50%;
+  background-color: var(--sw);
+  cursor: pointer;
+
+  &:hover {
+    transform: scale(1.12);
+  }
+  &.current {
+    box-shadow:
+      0 0 0 2px var(--tn-bg),
+      0 0 0 4px var(--tn-accent);
+  }
+  &:focus-visible {
+    outline: var(--tn-focus);
+    outline-offset: 3px;
+  }
+}
+/* 色の丸の地の色（属性から決める．インラインのスタイルを使わないため） */
+.tnSwatch[data-color="#ffd400"] { --sw: #ffd400; }
+.tnSwatch[data-color="#ff6666"] { --sw: #ff6666; }
+.tnSwatch[data-color="#5fb236"] { --sw: #5fb236; }
+.tnSwatch[data-color="#2ea8e5"] { --sw: #2ea8e5; }
+.tnSwatch[data-color="#a28ae5"] { --sw: #a28ae5; }
+.tnSwatch[data-color="#e56eee"] { --sw: #e56eee; }
+.tnSwatch[data-color="#f19837"] { --sw: #f19837; }
+.tnSwatch[data-color="#aaaaaa"] { --sw: #aaaaaa; }
+
+.tnComment {
+  max-height: 9em;
+  overflow: auto;
+  padding: 6px 8px;
+  white-space: pre-wrap;
+  background-color: var(--tn-field-bg);
+  border-inline-start: 3px solid var(--tn-accent);
+  border-radius: 2px;
+
+  &.empty {
+    color: var(--tn-fg-weak);
+  }
+}
+.tnSource {
+  max-height: 30vh;
+}
+.tnResult {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+
+  &[hidden] {
+    display: none;
+  }
+}
+.tnOutput {
+  max-height: 30vh;
+}
+.tnFooter {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: 2px;
+  border-top: 1px solid var(--tn-separator);
+}
+.tnService {
+  max-width: 100%;
+  padding: 2px 4px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--tn-fg-weak);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+
+  &:focus-visible {
+    outline: var(--tn-focus);
+  }
+  option {
+    color: var(--tn-field-fg);
+    background-color: var(--tn-field-bg);
+  }
+}
+
+/*
+ * ---- 左のパネルの「Annotations」のカード ----
+ * パネルの地や文字の色は pdf.js のまま．カードの色は overrides.css が pdf.js の左のパネルの値から入れる（--tn-card-…）．
+ */
+.tnSidebar {
+  box-sizing: border-box;
+  padding: 8px;
+  color: var(--tn-card-fg);
+  font: var(--tn-font);
+  font-size: var(--tn-font-size);
+  line-height: 1.45;
+}
+.tnSideEmpty {
+  margin: 16px 8px;
+  color: var(--tn-card-weak);
+}
+.tnCards {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.tnCard {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 8px 8px;
+  background-color: var(--tn-card-bg);
+  border: 1px solid transparent;
+  border-radius: 6px;
+
+  &:hover {
+    background-color: var(--tn-card-hover-bg);
+  }
+  &.selected {
+    border-color: var(--tn-card-selected);
+  }
+  &.failed {
+    background-color: var(--tn-card-error-bg);
+  }
+}
+.tnCardHead {
+  appearance: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  font: inherit;
+  font-weight: 590;
+  color: inherit;
+  text-align: start;
+  background: none;
+  border: none;
+  cursor: pointer;
+
+  &:focus-visible {
+    outline: var(--tn-focus);
+    outline-offset: 2px;
+  }
+}
+.tnCardDot {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  background-color: var(--sw);
+}
+.tnCardPage {
+  flex: none;
+}
+.tnCardState {
+  margin-inline-start: auto;
+  font-weight: 400;
+  font-size: 12px;
+  color: var(--tn-card-weak);
+
+  &.running {
+    color: var(--tn-card-accent);
+  }
+  &.error {
+    color: var(--tn-card-error-fg);
+  }
+}
+.tnCardQuote {
+  margin: 0;
+  padding: 0 0 0 8px;
+  color: var(--tn-card-weak);
+  border-inline-start: 3px solid var(--sw);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  overflow: hidden;
+
+  &.expanded {
+    display: block;
+    -webkit-line-clamp: unset;
+    line-clamp: unset;
+  }
+}
+.tnCardComment {
+  padding: 2px 4px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  border-radius: 4px;
+  cursor: text;
+
+  &:hover {
+    background-color: var(--tn-card-hover-bg);
+  }
+  &:focus-visible {
+    outline: var(--tn-focus);
+    outline-offset: 1px;
+  }
+  &.empty {
+    color: var(--tn-card-weak);
+    font-style: italic;
+  }
+  &.streaming {
+    color: var(--tn-card-accent);
+  }
+}
+.tnCardEditor {
+  min-height: 5em;
+}
+.tnCardActions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+
+  &:empty {
+    display: none;
+  }
+  .tnLink {
+    color: var(--tn-card-accent);
+  }
+}
+.tnCardError {
+  flex: 1 1 100%;
+  color: var(--tn-card-error-fg);
+  overflow-wrap: anywhere;
+}
+.tnCard.busy .tnCardDot {
+  animation: tnFade 1.2s ease-in-out infinite;
+}
+@keyframes tnFade {
+  50% {
+    opacity: 0.3;
+  }
+}
+
+/* ---- 左下の知らせ ---- */
+#tnToast {
+  position: fixed;
+  inset-inline-start: 16px;
+  inset-block-end: 16px;
+  z-index: 110;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  pointer-events: none;
+}
+.tnToastItem {
+  max-width: 420px;
+  padding: 8px 12px;
+  background-color: var(--tn-bg);
+  border: 1px solid var(--tn-border);
+  border-radius: var(--tn-radius);
+  box-shadow: var(--tn-shadow);
+
+  &.ok {
+    border-color: var(--tn-ok);
+  }
+  &.error {
+    color: var(--tn-error);
+    border-color: var(--tn-error);
+  }
+}
+
+/* ---- 設定画面 ---- */
+#tnSettings {
+  width: min(720px, calc(100vw - 48px));
+  max-height: calc(100vh - 48px);
+  box-sizing: border-box;
+  padding: 16px 20px;
+  background-color: var(--tn-bg);
+  border: 1px solid var(--tn-border);
+  border-radius: var(--tn-radius);
+  box-shadow: var(--tn-shadow);
+
+  &::backdrop {
+    background: rgb(0 0 0 / 0.3);
+  }
+  h2 {
+    margin: 0 0 8px;
+    font-size: 15px;
+  }
+  h3 {
+    margin: 14px 0 6px;
+    font-size: 13px;
+  }
+  fieldset {
+    margin: 0;
+    padding: 10px 12px;
+    border: 1px solid var(--tn-separator);
+    border-radius: 4px;
+  }
+  input:not([type="checkbox"]),
+  select,
+  textarea {
+    width: 100%;
+    box-sizing: border-box;
+    min-height: 28px;
+    padding: 4px 8px;
+    font: inherit;
+    color: var(--tn-field-fg);
+    background-color: var(--tn-field-bg);
+    border: 1px solid var(--tn-field-border);
+    border-radius: 4px;
+
+    &:focus-visible {
+      outline: var(--tn-focus);
+      outline-offset: -1px;
+      border-color: transparent;
+    }
+  }
+  textarea {
+    resize: vertical;
+    font-family: ui-monospace, Consolas, monospace;
+  }
+}
+.tnServiceBar {
+  display: flex;
+  gap: 6px;
+
+  select {
+    flex: 1;
+  }
+}
+.tnRow {
+  display: grid;
+  grid-template-columns: 9em minmax(0, 1fr);
+  gap: 4px 12px;
+  align-items: start;
+  margin-block: 6px;
+
+  > label {
+    padding-top: 4px;
+    font-weight: 590;
+  }
+}
+.tnRowBody {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+
+  small {
+    color: var(--tn-fg-weak);
+  }
+}
+.tnInline {
+  display: flex;
+  gap: 6px;
+}
+.tnTestResult {
+  color: var(--tn-fg-weak);
+
+  &:empty {
+    display: none;
+  }
+  &.ok {
+    color: var(--tn-ok);
+  }
+  &.error {
+    color: var(--tn-error);
+  }
+}
+.tnCheck {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.tnDialogButtons {
+  display: flex;
+  gap: 8px;
+  margin-top: 14px;
+}
+.tnSpacer {
+  flex: 1;
+}
+
+@media (max-width: 560px) {
+  .tnRow {
+    grid-template-columns: 1fr;
+  }
+}

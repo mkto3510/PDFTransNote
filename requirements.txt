@@ -1,0 +1,2 @@
+# 動かすのに要るもの（pythonnet，clr-loader，bottle，proxy_tools なども一緒に入る）
+pywebview==6.2.1
