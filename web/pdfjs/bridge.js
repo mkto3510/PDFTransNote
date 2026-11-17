@@ -14,8 +14,11 @@
 // pdf.js に触れない計算（色，quadPoints の中の文字，並べ方）は highlight-math.mjs に分けてある．
 
 import { blendOpacity, compareHighlights, textInQuads } from "./highlight-math.mjs";
+import { analyzeDocument, DEFAULT_OPTIONS as STRUCTURE_DEFAULTS, filterSelection } from "./page-structure.mjs";
 
 const HOOK_LABEL = "transnote";
+/** 一度に選べるページの数（長いと，pdf.js が途中のページの層を捨てることがある）． */
+const MAX_SELECTION_PAGES = 3;
 
 // ---------------------------------------------------------------------------
 // 1. 小道具
@@ -77,7 +80,10 @@ let fileHl = new Map(); // pageIndex → [{ id, pageIndex, quadPoints, color, op
 let fileHlLoading = new Map(); // pageIndex → Promise
 let fileHlIds = new Set(); // ファイルにあったハイライトの ID（canvas に描かせない）
 let fileHlVersion = 0;
-const textItemsCache = new Map(); // pageIndex → Promise<getTextContent の items>
+const contentCache = new Map(); // pageIndex → Promise<ページの文字（pageContent の値）>
+let scanned = []; // pageIndex → 読み終えたページの文字（分析に渡す．読んでいなければ undefined）
+let analysis = null; // 本文とそれ以外の分類（page-structure.mjs の analyzeDocument の値）
+let analysisDirty = true;
 const textCache = new Map(); // 注釈の ID → 範囲の文字
 
 /** 今の文書．文書が変わっていたら，覚えを捨てて，新しい文書の注釈の置き場を見張る． */
@@ -89,7 +95,10 @@ function currentDoc() {
     fileHlLoading = new Map();
     fileHlIds = new Set();
     fileHlVersion++;
-    textItemsCache.clear();
+    contentCache.clear();
+    scanned = [];
+    analysis = null;
+    analysisDirty = true;
     textCache.clear();
     if (d) patchStorage(d.annotationStorage);
   }
@@ -261,8 +270,6 @@ function highlightsChanged() {
 const editorText = new WeakMap();
 /** このセッションで作ったハイライトの範囲（文字の層＝ページに対する割合の矩形の並び）． */
 const editorBoxes = new WeakMap();
-/** 次に作られる注釈を待つ人（highlightSelection などは作った注釈を返さないため）． */
-let captureNext = null;
 
 /** pdf.js の注釈の種類（クラス）．ハイライト用のモードに切り替えずにハイライトを作るのに使う． */
 let editorTypes = [];
@@ -300,25 +307,10 @@ function patchEditorClasses() {
       const editor = original.call(this, event, isCentered, data);
       if (editor && typeof data.text === "string") editorText.set(editor, data.text);
       if (editor && Array.isArray(data.boxes)) editorBoxes.set(editor, data.boxes);
-      if (editor) captureNext?.(editor);
       return editor;
     };
     layer.__transnotePatched = true;
   }
-}
-
-function waitNextEditor(timeout = 3000) {
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => {
-      captureNext = null;
-      resolve(null);
-    }, timeout);
-    captureNext = (ed) => {
-      clearTimeout(timer);
-      captureNext = null;
-      resolve(ed);
-    };
-  });
 }
 
 /** モードの切り替えを伴う操作を 1 件ずつ順に行う（途中で次の操作が重なると，受け取りが混ざるため）． */
@@ -406,84 +398,325 @@ function inHighlightMode(fn) {
 // 3. 選んだ範囲の記録とハイライトの作成
 // ---------------------------------------------------------------------------
 
-/** 今の選択を，ハイライトにするための情報として記録する（文字の層の中の選択だけ）． */
-function captureAnchor() {
-  const sel = document.getSelection();
-  if (!sel || sel.isCollapsed || !sel.rangeCount) return null;
-  const text = sel.toString();
-  if (!text.trim()) return null;
-  const node = sel.anchorNode;
-  const elem = node?.nodeType === Node.TEXT_NODE ? node.parentElement : node;
-  const textLayer = elem?.closest?.(".textLayer");
-  if (!textLayer) return null;
-  const boxes = uiManager()?.getSelectionBoxes(textLayer);
-  const pageIndex = pageIndexOf(textLayer);
-  if (!boxes?.length || pageIndex < 0) return null;
+// 選択はページをまたいでよい．pdf.js が選択をページごとに分けて描くやり方（DrawLayer の selectionchange）に倣い，
+// 範囲と交わる文字の層ごとに，文字のノードを範囲で切って集める（「断片」）．ページの間の注釈の層や，
+// 構造ツリーの代替テキスト・MathML は拾わない．矩形は断片ごとの部分の範囲から取る（要素ごとの矩形を混ぜない．
+// タグ付き PDF では，代替テキストのある図全体を包む矩形が入ってしまうため）．
+
+/** 文字の層の中で飛ばす要素（選択の終わりの印，画像の層，代替テキストの図）． */
+const SKIP_IN_LAYER = ".endOfContent, .textLayerImages, span[role='img']";
+const FONT_SPAN = "span[style*='--font-height']";
+
+/** 範囲と交わる文字の層（文書の順）． */
+function selectedTextLayers(range) {
+  return [...document.querySelectorAll("#viewer .page .textLayer")].filter((layer) => range.intersectsNode(layer));
+}
+
+/** 文字の層の client 座標の矩形を，層に対する割合の矩形にする（getSelectionBoxes と同じ回転の扱い）． */
+function layerRotator(layer) {
+  const { x: lx, y: ly, width: pw, height: ph } = layer.getBoundingClientRect();
+  switch (layer.getAttribute("data-main-rotation")) {
+    case "90":
+      return (r) => ({ x: (r.y - ly) / ph, y: 1 - (r.x + r.width - lx) / pw, width: r.height / ph, height: r.width / pw });
+    case "180":
+      return (r) => ({ x: 1 - (r.x + r.width - lx) / pw, y: 1 - (r.y + r.height - ly) / ph, width: r.width / pw, height: r.height / ph });
+    case "270":
+      return (r) => ({ x: 1 - (r.y + r.height - ly) / ph, y: (r.x - lx) / pw, width: r.height / ph, height: r.width / pw });
+    default:
+      return (r) => ({ x: (r.x - lx) / pw, y: (r.y - ly) / ph, width: r.width / pw, height: r.height / ph });
+  }
+}
+
+/**
+ * 文字の層の span と，ページの文字の項目の番号の対応．pdf.js は，文字が空でない項目ごとに span を順に作る．
+ * 覚えた項目の文字と合わなければ null（分類を使わない）．
+ */
+function spanIndexMap(layer, pageIndex) {
+  const spans = [...layer.querySelectorAll(FONT_SPAN)];
+  const strs = scanned[pageIndex]?.items.filter((i) => typeof i.str === "string" && i.str !== "").map((i) => i.str);
+  if (!strs || spans.length > strs.length) return null;
+  for (const k of [0, spans.length >> 1, spans.length - 1]) {
+    if (spans[k] && spans[k].textContent !== strs[k]) {
+      console.warn("[transnote] text layer spans do not match the text content", pageIndex);
+      return null;
+    }
+  }
+  return new Map(spans.map((s, k) => [s, k]));
+}
+
+/** 範囲 range の中の，文字の層 layer の断片（文書の順）． */
+function piecesInLayer(range, layer) {
+  const pageIndex = pageIndexOf(layer);
+  const map = spanIndexMap(layer, pageIndex);
+  const toBox = layerRotator(layer);
+  const walker = document.createTreeWalker(layer, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
+    acceptNode: (n) =>
+      n.nodeType === Node.ELEMENT_NODE ? (n.matches(SKIP_IN_LAYER) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_SKIP) : NodeFilter.FILTER_ACCEPT,
+  });
+  const out = [];
+  const sub = document.createRange();
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    if (!range.intersectsNode(node)) continue;
+    const s = node === range.startContainer ? range.startOffset : 0;
+    const e = node === range.endContainer ? range.endOffset : node.length;
+    if (s >= e) continue;
+    const span = node.parentElement?.closest(FONT_SPAN);
+    if (!span || !layer.contains(span)) continue;
+    sub.setStart(node, s);
+    sub.setEnd(node, e);
+    const rects = [...sub.getClientRects()].filter((r) => r.width > 0 && r.height > 0);
+    if (!rects.length) continue;
+    out.push({
+      pageIndex,
+      node,
+      start: s,
+      end: e,
+      text: node.data.slice(s, e),
+      spanIndex: map?.get(span) ?? -1,
+      boxes: rects.map(toBox),
+      rect: union(rects),
+    });
+  }
+  return out;
+}
+
+/** 断片の矩形を，行ごとに 1 つにまとめる（続く断片で，縦が重なり，横の隙間が小さいもの）． */
+function mergeBoxes(pieces) {
+  const out = [];
+  for (const b of pieces.flatMap((p) => p.boxes)) {
+    const last = out.at(-1);
+    if (last) {
+      const overlap = Math.min(last.y + last.height, b.y + b.height) - Math.max(last.y, b.y);
+      const gap = b.x - (last.x + last.width);
+      if (overlap > 0.5 * Math.min(last.height, b.height) && gap < 2 * Math.max(last.height, b.height) && gap > -last.width) {
+        const x = Math.min(last.x, b.x);
+        const y = Math.min(last.y, b.y);
+        last.width = Math.max(last.x + last.width, b.x + b.width) - x;
+        last.height = Math.max(last.y + last.height, b.y + b.height) - y;
+        last.x = x;
+        last.y = y;
+        continue;
+      }
+    }
+    out.push({ ...b });
+  }
+  return out;
+}
+
+/** 断片の文字をつなぐ．行が変わるところ，ページが変わるところ，除いた部分を挟むところは改行にする． */
+function joinPieces(pieces) {
+  let out = "";
+  let prev = null;
+  for (const p of pieces) {
+    if (prev) {
+      const newLine =
+        p.pageIndex !== prev.pageIndex || p.after !== prev.index || p.rect.top > prev.rect.bottom - p.rect.height / 2 || p.rect.bottom < prev.rect.top;
+      if (newLine) out += "\n";
+    }
+    out += p.text;
+    prev = p;
+  }
+  return out;
+}
+
+/** 断片の並びから，ページごとの部分を作る（ハイライト 1 件ずつになる）． */
+function buildParts(pieces) {
+  const parts = [];
+  for (const p of pieces) {
+    let part = parts.at(-1);
+    if (!part || part.pageIndex !== p.pageIndex) {
+      part = { pageIndex: p.pageIndex, pieces: [] };
+      parts.push(part);
+    }
+    part.pieces.push(p);
+  }
+  return parts
+    .map(({ pageIndex, pieces: ps }) => ({
+      pageIndex,
+      boxes: mergeBoxes(ps),
+      text: joinPieces(ps),
+      anchorNode: ps[0].node,
+      anchorOffset: ps[0].start,
+      focusNode: ps.at(-1).node,
+      focusOffset: ps.at(-1).end,
+    }))
+    .filter((part) => part.boxes.length);
+}
+
+/** 断片の並びから anchor を作る（removed は除いた部分の一覧）． */
+function makeAnchor(pieces, { text = null, removed = [], backward = false } = {}) {
+  const parts = buildParts(pieces);
+  if (!parts.length) return null;
+  const joined = text ?? joinPieces(pieces);
+  if (!joined.trim()) return null;
   return {
-    text,
-    pageIndex,
-    // 文字の層に対する割合で表した範囲（倍率が変わってもそのまま使える）
-    boxes,
-    anchorNode: sel.anchorNode,
-    anchorOffset: sel.anchorOffset,
-    focusNode: sel.focusNode,
-    focusOffset: sel.focusOffset,
+    text: joined,
+    // 最初の部分（1 ページだけのときは，これまでと同じ形で使える）
+    pageIndex: parts[0].pageIndex,
+    boxes: parts[0].boxes,
+    anchorNode: parts[0].anchorNode,
+    anchorOffset: parts[0].anchorOffset,
+    focusNode: parts[0].focusNode,
+    focusOffset: parts[0].focusOffset,
+    parts,
+    focusPart: backward ? 0 : parts.length - 1, // 選び終えた側の部分（ポップアップをそこに出す）
+    removed,
+    raw: null,
   };
 }
 
-/** 記録した範囲に，色 color のハイライトを作る．作ったハイライトの target を返す（作れなければ null）． */
-async function createHighlight(anchor, color) {
-  let layer = uiManager()?.getLayer(anchor.pageIndex);
-  if (!layer) {
-    // まだ描かれていないページ：そのページを表示して，注釈の層ができるのを待つ
-    app().page = anchor.pageIndex + 1;
-    await waitEvent("annotationeditorlayerrendered", (e) => e.pageNumber === anchor.pageIndex + 1);
+/** 直前の captureAnchor で，途中のページの文字の層がまだなかったか（描き終えたら読み直す）． */
+let missingLayer = false;
+
+/**
+ * 今の選択を，ハイライトにするための情報（anchor）として記録する．ページをまたいでよい（MAX_SELECTION_PAGES まで）．
+ * 本文に挟まれたヘッダー・フッター・図表の見出しなどは，設定に従って除く（page-structure.mjs）．
+ * @param {{notify?: boolean}} [opts] notify が真なら，長すぎる選択を知らせる
+ */
+function captureAnchor({ notify = false } = {}) {
+  missingLayer = false;
+  const sel = document.getSelection();
+  if (!sel || sel.isCollapsed || !sel.rangeCount) return null;
+  const range = sel.getRangeAt(0);
+  const layers = selectedTextLayers(range);
+  if (!layers.length || layers.some((l) => l.hidden || l.closest("[hidden]"))) return null;
+  const first = pageIndexOf(layers[0]);
+  const last = pageIndexOf(layers.at(-1));
+  if (first < 0 || last < 0) return null;
+  if (last - first + 1 > MAX_SELECTION_PAGES) {
+    if (notify) emit("notice", "selectionTooLong", { maxPages: MAX_SELECTION_PAGES });
+    return null;
   }
-  const data = {
-    methodOfCreation: HOOK_LABEL,
-    boxes: anchor.boxes,
-    anchorNode: anchor.anchorNode,
-    anchorOffset: anchor.anchorOffset,
-    focusNode: anchor.focusNode,
-    focusOffset: anchor.focusOffset,
-    text: anchor.text,
-  };
-  const finish = (ed, um) => {
-    if (!ed) return null;
-    if (color) ed.updateParams(lib().AnnotationEditorParamsType.HIGHLIGHT_COLOR, color);
-    um.showAllEditors("highlight", true, true);
-    highlightsChanged();
-    return { kind: "editor", editor: ed };
-  };
-  // 1. モードを切り替えずに作る．ハイライト用のモードに切り替えると，その間にユーザーが選んだ文字を
-  //    pdf.js が自動でハイライトしてしまううえ，切り替えに時間もかかるため．
-  const um = uiManager();
-  const Cls = highlightClass();
-  layer = um?.getLayer(anchor.pageIndex);
-  if (Cls && layer) {
+  if (layers.length !== last - first + 1) {
+    missingLayer = true; // 途中のページを描いている途中
+    return null;
+  }
+  const pieces = layers.flatMap((layer) => piecesInLayer(range, layer));
+  if (!pieces.some((p) => p.text.trim())) return null;
+  pieces.forEach((p, i) => {
+    p.index = i;
+    p.after = i - 1;
+  });
+  const backward = sel.anchorNode === range.endContainer && sel.anchorOffset === range.endOffset;
+
+  // 本文に挟まれたものを除く
+  let kept = pieces;
+  let removed = [];
+  const a = currentAnalysis();
+  if (a) {
     try {
-      const ed = new Cls({ parent: layer, id: um.getId(), x: 0, y: 0, uiManager: um, isCentered: false, ...data });
-      // 作った直後に注釈へフォーカスすると pdf.js が編集モードに入るので，フォーカスさせない
-      const onceAdded = ed.onceAdded.bind(ed);
-      ed.onceAdded = () => onceAdded(false);
-      layer.add(ed);
-      delete ed.onceAdded;
-      editorText.set(ed, anchor.text);
-      editorBoxes.set(ed, anchor.boxes);
-      if (um.getMode() === EditorType().NONE) ed.disableEditing();
-      return finish(ed, um);
+      const r = filterSelection(pieces, a, filterOptions);
+      if (r.keep.some((k) => !k) && r.keep.some((k, i) => k && pieces[i].text.trim())) {
+        kept = pieces.filter((_, i) => r.keep[i]);
+        removed = r.removed;
+      }
     } catch (e) {
-      console.warn("[transnote] direct highlight failed; falling back", e);
+      console.error("[transnote] filterSelection", e);
     }
   }
-  // 2. 作れなかったら，pdf.js の手順（ハイライト用のモードにして作る）
-  return inHighlightMode(async (um2) => {
-    layer = um2.getLayer(anchor.pageIndex);
-    if (!layer) return null;
-    const waiting = waitNextEditor();
-    layer.createAndAddNewEditor({ x: 0, y: 0 }, false, data);
-    return finish(await waiting, um2);
+  // 除いた部分を挟むところは改行にする（cleanSource がページの境目で切れた単語をつなぎ直す）
+  kept.forEach((p, i) => {
+    if (i > 0) p.after = kept[i - 1].index === p.index - 1 ? p.index - 1 : -1;
   });
+
+  // 1 ページの中で，何も除かず，範囲が文字の層の中に収まるときは，文字をこれまでどおり選択の文字にする
+  const simple = !removed.length && layers.length === 1 && layers[0].contains(range.commonAncestorContainer);
+  const anchor = makeAnchor(kept, { text: simple ? sel.toString() : null, removed, backward });
+  if (anchor && removed.length) {
+    pieces.forEach((p, i) => (p.after = i - 1));
+    anchor.raw = makeAnchor(pieces, { backward });
+  }
+  return anchor;
+}
+
+/**
+ * ページをまたぐハイライトのまとまり（このセッションの間だけ．保存すると残らない）．
+ * 部分のハイライト → まとまりの部分の並び．コメント・色・削除・翻訳中の印は，まとまり全体に行う．
+ */
+const groups = new WeakMap();
+/** ed のまとまりの部分（生きているもの）．まとまりでなければ [ed]． */
+const groupOf = (ed) => (groups.get(ed) ?? [ed]).filter(editorAlive);
+
+/** 部分 1 つ分の，ハイライトを作るための値． */
+const editorData = (part, text) => ({
+  methodOfCreation: HOOK_LABEL,
+  boxes: part.boxes,
+  // その部分の最初と最後の文字（他のページの位置を渡すと，選びを外したときにカーソルがそのページへ飛ぶ）
+  anchorNode: part.anchorNode ?? null,
+  anchorOffset: part.anchorOffset ?? 0,
+  focusNode: part.focusNode ?? null,
+  focusOffset: part.focusOffset ?? 0,
+  text,
+});
+
+/**
+ * モードを切り替えずにハイライトを作る．ハイライト用のモードに切り替えると，その間にユーザーが選んだ文字を
+ * pdf.js が自動でハイライトしてしまううえ，切り替えに時間もかかるため．作れなければ null．
+ */
+function createEditorDirect(part, text) {
+  const um = uiManager();
+  const Cls = highlightClass();
+  const layer = um?.getLayer(part.pageIndex);
+  if (!Cls || !layer) return null;
+  try {
+    const ed = new Cls({ parent: layer, id: um.getId(), x: 0, y: 0, uiManager: um, isCentered: false, ...editorData(part, text) });
+    // 作った直後に注釈へフォーカスすると pdf.js が編集モードに入るので，フォーカスさせない
+    const onceAdded = ed.onceAdded.bind(ed);
+    ed.onceAdded = () => onceAdded(false);
+    layer.add(ed);
+    delete ed.onceAdded;
+    if (um.getMode() === EditorType().NONE) ed.disableEditing();
+    return ed;
+  } catch (e) {
+    console.warn("[transnote] direct highlight failed; falling back", e);
+    return null;
+  }
+}
+
+/**
+ * 記録した範囲に，色 color のハイライトを作る．ページをまたぐ範囲は，ページごとのハイライトにして，まとまりとして覚える．
+ * 最初の部分のハイライトの target を返す（作れなければ null）．
+ */
+async function createHighlight(anchor, color) {
+  const parts = (anchor.parts ?? [{ pageIndex: anchor.pageIndex, boxes: anchor.boxes, ...anchor }]).filter((p) => p.boxes?.length);
+  if (!parts.length) return null;
+  // まだ描かれていないページ：最初の部分のページを 1 回だけ表示して，足りない注釈の層ができるのを待つ
+  const missing = parts.filter((p) => !uiManager()?.getLayer(p.pageIndex));
+  if (missing.length) {
+    const waits = missing.map((p) => waitEvent("annotationeditorlayerrendered", (e) => e.pageNumber === p.pageIndex + 1));
+    app().page = missing[0].pageIndex + 1;
+    await Promise.all(waits);
+  }
+  // どの部分のハイライトにも，つないだ全文を覚える（どの部分から訳し直しても全文を訳す）
+  const text = anchor.text;
+  const made = new Map(); // part → editor
+  for (const part of parts) {
+    const ed = createEditorDirect(part, text);
+    if (ed) made.set(part, ed);
+  }
+  // 作れなかった部分は，pdf.js の手順（ハイライト用のモードにして作る）で，1 回の切り替えの中でまとめて作る
+  const rest = parts.filter((p) => !made.has(p) && uiManager()?.getLayer(p.pageIndex));
+  if (rest.length) {
+    await inHighlightMode(async (um2) => {
+      for (const part of rest) {
+        const layer = um2.getLayer(part.pageIndex);
+        const ed = layer?.createAndAddNewEditor({ x: 0, y: 0 }, false, editorData(part, text));
+        if (ed) made.set(part, ed);
+      }
+    });
+  }
+  const eds = parts.map((p) => made.get(p)).filter(Boolean);
+  if (!eds.length) return null;
+  for (const [part, ed] of made) {
+    editorText.set(ed, text);
+    editorBoxes.set(ed, part.boxes);
+    if (color) ed.updateParams(lib().AnnotationEditorParamsType.HIGHLIGHT_COLOR, color);
+  }
+  if (eds.length > 1) for (const ed of eds) groups.set(ed, eds);
+  if (eds.length < parts.length) emit("notice", "highlightPartsFailed", { failed: parts.length - eds.length, total: parts.length });
+  uiManager()?.showAllEditors("highlight", true, true);
+  highlightsChanged();
+  return { kind: "editor", editor: eds[0] };
 }
 
 // ---------------------------------------------------------------------------
@@ -585,7 +818,12 @@ const changed = (ok) => {
 
 async function setComment(target, text) {
   if (!isAlive(target)) return false;
-  return changed(!!(await withEditor(target, (ed) => writeComment(ed, text))));
+  return changed(
+    !!(await withEditor(target, (ed) => {
+      for (const part of groupOf(ed)) writeComment(part, text); // まとまりのどの部分にも同じ訳を入れる
+      return true;
+    })),
+  );
 }
 
 function getColor(target) {
@@ -598,7 +836,7 @@ async function setColor(target, color) {
   if (!isAlive(target)) return false;
   return changed(
     !!(await withEditor(target, (ed) => {
-      ed.updateParams(lib().AnnotationEditorParamsType.HIGHLIGHT_COLOR, color);
+      for (const part of groupOf(ed)) part.updateParams(lib().AnnotationEditorParamsType.HIGHLIGHT_COLOR, color);
       return true;
     })),
   );
@@ -608,7 +846,7 @@ async function remove(target) {
   if (!isAlive(target)) return false;
   return changed(
     !!(await withEditor(target, (ed) => {
-      ed.remove(); // ファイルにあった注釈なら，消したことが記録され，保存で消える
+      for (const part of groupOf(ed)) part.remove(); // ファイルにあった注釈なら，消したことが記録され，保存で消える
       return true;
     })),
   );
@@ -645,14 +883,23 @@ function toClientRects(pageIndex, boxes) {
   return boxes.map((b) => new DOMRect(r.left + b.x * r.width, r.top + b.y * r.height, b.width * r.width, b.height * r.height));
 }
 
-/** 翻訳中の印（ハイライトの上の点線の枠）を付け外す．ページの中に置くので，倍率が変わっても位置が合う． */
+/** 翻訳中の印（ハイライトの上の点線の枠）を付け外す．ページをまたぐまとまりは，すべての部分に付ける． */
 function markBusy(target, on) {
   if (!target) return;
-  const { pageIndex, boxes } = fracBoxes(target);
+  const ed = target.kind === "editor" ? target.editor : resolveEditor(target);
+  const members = ed && groups.has(ed) ? groups.get(ed) : null; // 消えた部分の印も外せるよう，生死を問わない
+  if (!members) return markBusyOne(target, on);
+  for (const m of members) markBusyOne({ kind: "editor", editor: m }, on && editorAlive(m));
+}
+
+/** 翻訳中の印を 1 件分付け外す．ページの中に置くので，倍率が変わっても位置が合う． */
+function markBusyOne(target, on) {
   const key = target.kind === "editor" ? target.editor.id : `a-${target.id}`;
   for (const old of document.querySelectorAll(`.tnBusyMark[data-key="${CSS.escape(key)}"]`)) old.remove();
+  if (!on) return;
+  const { pageIndex, boxes } = fracBoxes(target);
   const div = pageDiv(pageIndex);
-  if (!on || !div) return;
+  if (!div) return;
   for (const b of boxes) {
     const m = document.createElement("div");
     m.className = "tnBusyMark";
@@ -669,12 +916,17 @@ function rectOf(target) {
   return union(toClientRects(pageIndex, boxes));
 }
 
-/** 記録した範囲の位置（client 座標）． */
+/** 記録した範囲の位置（client 座標）．ページをまたぐときは，選び終えた側の部分（なければ見えている部分）． */
 function rectOfAnchor(anchor) {
-  const layer = textLayerOf(anchor.pageIndex);
-  if (!layer) return null;
-  const r = layer.getBoundingClientRect();
-  return union(anchor.boxes.map((b) => new DOMRect(r.left + b.x * r.width, r.top + b.y * r.height, b.width * r.width, b.height * r.height)));
+  const parts = anchor.parts ?? [anchor];
+  const rectOfPart = (part) => {
+    const layer = textLayerOf(part.pageIndex);
+    if (!layer || !part.boxes?.length) return null;
+    const r = layer.getBoundingClientRect();
+    return union(part.boxes.map((b) => new DOMRect(r.left + b.x * r.width, r.top + b.y * r.height, b.width * r.width, b.height * r.height)));
+  };
+  const focus = parts[anchor.focusPart ?? parts.length - 1];
+  return (focus && rectOfPart(focus)) ?? union(parts.map(rectOfPart));
 }
 
 // ---------------------------------------------------------------------------
@@ -737,21 +989,75 @@ function quadsOf(pageIndex, id) {
 
 const hasTextLayer = (pageIndex) => !!textLayerOf(pageIndex)?.querySelector("span");
 
-/** ページの文字の位置（pdf.js の getTextContent）．ページごとに覚える． */
-function textItems(pageIndex) {
-  let p = textItemsCache.get(pageIndex);
+/**
+ * ページの文字（pdf.js の getTextContent）．ページごとに覚える．
+ * 文字の層と同じ指定（印の項目を含め，文字を正規化しない）で取るので，項目の順と span の順が合う．
+ * @returns {Promise<{view, rotate, items, styles} | null>}
+ */
+function pageContent(pageIndex) {
+  let p = contentCache.get(pageIndex);
   if (!p) {
     const d = currentDoc();
     p = d
       ? d
           .getPage(pageIndex + 1)
-          .then((page) => page.getTextContent())
-          .then((tc) => tc.items)
-          .catch(() => [])
-      : Promise.resolve([]);
-    textItemsCache.set(pageIndex, p);
+          .then(async (page) => {
+            const tc = await page.getTextContent({ includeMarkedContent: true, disableNormalization: true });
+            const content = { view: page.view, rotate: page.rotate, items: tc.items, styles: tc.styles };
+            if (d === doc) {
+              scanned[pageIndex] = content;
+              analysisDirty = true;
+            }
+            return content;
+          })
+          .catch(() => null)
+      : Promise.resolve(null);
+    contentCache.set(pageIndex, p);
   }
   return p;
+}
+
+/** ページの文字の項目（印の項目を除く）． */
+const textItems = (pageIndex) => pageContent(pageIndex).then((c) => (c ? c.items.filter((i) => typeof i.str === "string") : []));
+
+/** 文書を開いたら，裏で全ページの文字を読む（本文とそれ以外を見分けるため）．画面を止めないよう少しずつ． */
+async function scanDocument(d) {
+  const n = app()?.pagesCount ?? 0;
+  for (let i = 0; i < n; i++) {
+    if (d !== doc) return;
+    await pageContent(i);
+    if (i % 4 === 3) await sleep(0);
+  }
+}
+
+/** 本文とそれ以外の分類．読み終えたページだけで分ける（読んでいないページは分類なし）． */
+function currentAnalysis() {
+  if (!currentDoc()) return null;
+  if (analysisDirty || !analysis) {
+    const n = app()?.pagesCount ?? 0;
+    const pages = Array.from({ length: n }, (_, i) => scanned[i] ?? null);
+    try {
+      analysis = analyzeDocument(pages, { furnitureBand: filterOptions.furnitureBand, sizeTolerance: filterOptions.sizeTolerance });
+    } catch (e) {
+      console.error("[transnote] analyzeDocument", e);
+      analysis = null;
+    }
+    analysisDirty = false;
+  }
+  return analysis;
+}
+
+/** 本文の間から除くものの指定（app 側の設定から渡される）． */
+let filterOptions = { ...STRUCTURE_DEFAULTS };
+
+function setSelectionFilter(options = {}) {
+  const next = { ...filterOptions };
+  for (const k of Object.keys(STRUCTURE_DEFAULTS)) {
+    if (options[k] === undefined) continue;
+    next[k] = typeof STRUCTURE_DEFAULTS[k] === "boolean" ? !!options[k] : Number(options[k]);
+  }
+  if (next.furnitureBand !== filterOptions.furnitureBand || next.sizeTolerance !== filterOptions.sizeTolerance) analysisDirty = true;
+  filterOptions = next;
 }
 
 /**
@@ -875,17 +1181,26 @@ function bindPointer(container) {
     },
     true,
   );
-  // 捕捉の段階で受ける（注釈の層の要素は，pdf.js がコメントの表示のために伝わるのを止めることがある）
-  container.addEventListener(
+  // window の捕捉の段階で受ける（注釈の層の要素は，pdf.js がコメントの表示のために伝わるのを止めることがある．
+  // また，ページをまたいで選ぶときは，文書の外（ツールバーの上など）で離すことがある）
+  window.addEventListener(
     "pointerup",
     (e) => {
       if (e.button !== 0 || !down) return;
       const start = down;
       down = null;
       setTimeout(() => {
-        const anchor = captureAnchor();
+        const anchor = captureAnchor({ notify: true });
         if (anchor) {
           emit("selection", anchor);
+          return;
+        }
+        // 途中のページを描いている途中だった：描き終えたら読み直す
+        if (missingLayer) {
+          waitEvent("textlayerrendered", null, 1000).then(() => {
+            const again = captureAnchor({ notify: true });
+            if (again) emit("selection", again);
+          });
           return;
         }
         // 動かさずに押して離した（クリック）：ハイライトの上なら知らせる
@@ -896,11 +1211,13 @@ function bindPointer(container) {
     },
     true,
   );
-  // キーで選んだとき（Shift＋矢印など）
+  // キーで選んだとき（Shift＋矢印など）．pdf.js が選択の終わりの印を戻した後に読む
   container.addEventListener("keyup", (e) => {
     if (!e.shiftKey) return;
-    const anchor = captureAnchor();
-    if (anchor) emit("selection", anchor);
+    setTimeout(() => {
+      const anchor = captureAnchor({ notify: true });
+      if (anchor) emit("selection", anchor);
+    }, 0);
   });
 }
 
@@ -1079,7 +1396,8 @@ function bindHighlights(a) {
   bus.on("editorsrendered", (e) => drawFileHighlights(e.pageNumber - 1));
   bus.on("annotationeditorstateschanged", highlightsChanged);
   bus.on("documentloaded", () => {
-    currentDoc();
+    const d = currentDoc();
+    scanDocument(d); // 本文とそれ以外を見分けるため，裏でページの文字を読む
     loadAllHighlights().then(() => {
       drawAllFileHighlights();
       highlightsChanged();
@@ -1124,7 +1442,9 @@ document.addEventListener(
     o.set("enableComment", true);
     o.set("enableHighlightFloatingButton", false); // 独自のポップアップを使う
     o.set("defaultUrl", "");
-    o.set("localeProperties", { lang: "en-US" }); // 画面は英語にする（既定はブラウザーの言語）
+    // 画面の言語は設定に従う（サーバーが viewer.html に書き込む．既定はブラウザーの言語なので必ず決める）
+    const uiLang = document.querySelector('meta[name="transnote-ui-lang"]')?.content;
+    o.set("localeProperties", { lang: uiLang === "ja" ? "ja" : "en-US" });
     const a = window.PDFViewerApplication;
     hookOpenFile(a);
     patchEditorClasses(); // 注釈の層が作られる前に（registerEditorTypes を受け取るため）
@@ -1149,7 +1469,8 @@ document.addEventListener(
 export const bridge = {
   /**
    * イベント：ready，selection(anchor)，highlightClick(target, point)，layout，
-   * highlightsChanged（ハイライトの作成・変更・削除），sidebarView(visible)（左のパネルの Annotations が見えたか）．
+   * highlightsChanged（ハイライトの作成・変更・削除），sidebarView(visible)（左のパネルの Annotations が見えたか），
+   * notice(code, data)（"selectionTooLong" {maxPages}，"highlightPartsFailed" {failed, total}）．
    */
   on(name, fn) {
     if (!listeners.has(name)) listeners.set(name, []);
@@ -1193,6 +1514,15 @@ export const bridge = {
     if (ea || eb) return ea === eb;
     return a.id === b.id && a.pageIndex === b.pageIndex;
   },
+  /** 2 つの target が同じハイライトか，ページをまたぐ同じまとまりの部分か． */
+  sameGroup: (a, b) => {
+    if (bridge.sameTarget(a, b)) return true;
+    const ea = a && resolveEditor(a);
+    const eb = b && resolveEditor(b);
+    return !!(ea && eb && groups.get(ea)?.includes(eb));
+  },
+  /** 本文の間から除くもの（{skipFurniture, furnitureBand, skipCaptions, skipSmallText, sizeTolerance}）． */
+  setSelectionFilter,
   scrollTo: (target) => {
     const r = rectOf(target);
     if (r) document.getElementById("viewerContainer").scrollBy({ top: r.top - bridge.viewRect().top - 120 });
@@ -1220,6 +1550,11 @@ export const bridge = {
   showSidebar: () => sidebarView?.vm.switchView(ANNOTATIONS_VIEW, true),
   /** 左のパネルの開閉ボタンに印を付ける（翻訳の失敗など．Annotations が見えたら消える）． */
   setSidebarAlert,
+  /** 左のパネルのビューの選択肢に出す名前． */
+  setSidebarOptionLabel: (text) => {
+    const span = sidebarView?.button.querySelector("span");
+    if (span) span.textContent = text;
+  },
 
   // 開く・ドロップ・ツールバー
   setOpenHandler: (fn) => (openHandler = fn),
@@ -1227,6 +1562,18 @@ export const bridge = {
   addToolbarButton,
   setSaveButtonTitle: (title) => {
     const b = document.getElementById("downloadButton");
-    if (b) b.title = title;
+    if (!b) return;
+    // pdf.js は言語ファイルを読み終えてから説明を付ける（英語以外では起動の後になる）ので，訳の対象から外し，
+    // それでも書き換えられたら戻す
+    b.removeAttribute("data-l10n-id");
+    b.dataset.tnTitle = title;
+    const apply = () => {
+      if (b.title !== b.dataset.tnTitle) b.title = b.dataset.tnTitle;
+    };
+    apply();
+    if (!b.__tnTitleObserver) {
+      b.__tnTitleObserver = new MutationObserver(apply);
+      b.__tnTitleObserver.observe(b, { attributes: true, attributeFilter: ["title"] });
+    }
   },
 };

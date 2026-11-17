@@ -7,8 +7,9 @@
 import { LANGS, pickModel } from "./core.mjs";
 import * as api from "./api.js";
 import { el } from "./dom.js";
+import { lang, t, tn } from "./i18n.mjs";
 
-const langName = new Intl.DisplayNames(["en"], { type: "language" });
+const langName = new Intl.DisplayNames([lang], { type: "language" });
 const langLabel = (code) => {
   try {
     return `${langName.of(code.replace(/-(han[st])$/, (_, s) => "-" + s[0].toUpperCase() + s.slice(1)))} (${code})`;
@@ -32,10 +33,10 @@ export class SettingsDialog {
     this.current = 0; // 下書きの中で選んでいるサービスの番号
     const f = (this.f = {});
 
-    f.serviceList = el("select", { id: "tnServiceList", "aria-label": "Translation services", onchange: () => this.selectService(f.serviceList.selectedIndex) });
-    f.add = el("button", { class: "tnBtn", type: "button", onclick: () => this.addService(false) }, "Add");
-    f.dup = el("button", { class: "tnBtn", type: "button", onclick: () => this.addService(true) }, "Duplicate");
-    f.del = el("button", { class: "tnBtn danger", type: "button", onclick: () => this.deleteService() }, "Delete");
+    f.serviceList = el("select", { id: "tnServiceList", "aria-label": t("settings.services"), onchange: () => this.selectService(f.serviceList.selectedIndex) });
+    f.add = el("button", { class: "tnBtn", type: "button", onclick: () => this.addService(false) }, t("settings.add"));
+    f.dup = el("button", { class: "tnBtn", type: "button", onclick: () => this.addService(true) }, t("settings.duplicate"));
+    f.del = el("button", { class: "tnBtn danger", type: "button", onclick: () => this.deleteService() }, t("settings.delete"));
     f.active = el("input", { id: "tnActive", type: "checkbox", onchange: () => f.active.checked && (this.draft.activeService = this.svc().id) });
 
     f.name = el("input", { id: "tnName", type: "text" });
@@ -43,7 +44,7 @@ export class SettingsDialog {
     f.apiKey = el("input", { id: "tnApiKey", type: "password", autocomplete: "off", spellcheck: "false" });
     f.model = el("input", { id: "tnModel", type: "text", list: "tnModelList", spellcheck: "false" });
     f.modelList = el("datalist", { id: "tnModelList" });
-    f.test = el("button", { class: "tnBtn", type: "button", onclick: () => this.testConnection() }, "Test Connection");
+    f.test = el("button", { class: "tnBtn", type: "button", onclick: () => this.testConnection() }, t("settings.test"));
     f.testResult = el("small", { class: "tnTestResult" });
     f.temperature = el("input", { id: "tnTemperature", type: "number", min: "0", max: "2", step: "0.05" });
     f.systemPrompt = el("textarea", { id: "tnSystemPrompt", rows: "3", spellcheck: "false" });
@@ -55,6 +56,15 @@ export class SettingsDialog {
     f.langTo = el("select", { id: "tnLangTo" }, LANGS.map((c) => el("option", { value: c, text: langLabel(c) })));
     f.concurrency = el("input", { id: "tnConcurrency", type: "number", min: "1", max: "8", step: "1" });
     f.saveOnComment = el("input", { id: "tnSaveOnComment", type: "checkbox" });
+    f.backupCount = el("input", { id: "tnBackupCount", type: "number", min: "0", max: "200", step: "1" });
+    // 画面の言語の選択肢は，それぞれの言語で書く
+    f.uiLang = el("select", { id: "tnUiLang" }, [el("option", { value: "en", text: "English" }), el("option", { value: "ja", text: "日本語" })]);
+    // 選んだ文字のうち，本文に挟まれたものを除く
+    f.skipFurniture = el("input", { id: "tnSkipFurniture", type: "checkbox" });
+    f.furnitureBand = el("input", { id: "tnFurnitureBand", type: "number", min: "3", max: "25", step: "1" });
+    f.skipCaptions = el("input", { id: "tnSkipCaptions", type: "checkbox" });
+    f.skipSmallText = el("input", { id: "tnSkipSmallText", type: "checkbox" });
+    f.sizeTolerance = el("input", { id: "tnSizeTolerance", type: "number", min: "2", max: "30", step: "1" });
     f.error = el("div", { class: "tnStatus error", role: "alert" });
 
     for (const k of ["name", "endpoint", "apiKey", "model", "temperature", "systemPrompt", "prompt", "stream", "customParams"]) {
@@ -62,50 +72,63 @@ export class SettingsDialog {
     }
     f.name.addEventListener("input", () => {
       this.readService();
-      f.serviceList.options[this.current].text = this.svc().name || "(no name)";
+      f.serviceList.options[this.current].text = this.svc().name || t("settings.noName");
     });
 
     this.dialog = el(
       "dialog",
-      { id: "tnSettings", "aria-label": "PDF TransNote Settings" },
+      { id: "tnSettings", "aria-label": t("settings.dialog") },
       el(
         "form",
         { method: "dialog", onsubmit: (e) => e.preventDefault() },
-        el("h2", { text: "Settings" }),
-        el("h3", { text: "Translation services" }),
+        el("h2", { text: t("settings.title") }),
+        el("h3", { text: t("settings.services") }),
         el("div", { class: "tnServiceBar" }, f.serviceList, f.add, f.dup, f.del),
         el(
           "fieldset",
           { class: "tnService" },
-          el("label", { class: "tnCheck" }, f.active, "Use this service"),
-          row("Name", f.name),
-          row("Endpoint", f.endpoint, "A base URL such as http://localhost:1234 gets /v1/chat/completions appended. A URL ending in …/chat/completions is used as is."),
-          row("API key", f.apiKey, "Optional. Sent as Authorization: Bearer."),
-          row("Model", el("div", { class: "tnInline" }, f.model, f.test), null),
+          el("label", { class: "tnCheck" }, f.active, t("settings.useService")),
+          row(t("settings.name"), f.name),
+          row(t("settings.endpoint"), f.endpoint, t("settings.endpointHelp")),
+          row(t("settings.apiKey"), f.apiKey, t("settings.apiKeyHelp")),
+          row(t("settings.model"), el("div", { class: "tnInline" }, f.model, f.test), null),
           el("div", { class: "tnRow" }, el("span"), el("div", { class: "tnRowBody" }, f.testResult, f.modelList)),
-          row("temperature", f.temperature),
-          row("System prompt", f.systemPrompt, "Sent as the system message (not sent if empty). For PLaMo 3 Translate, put the [plamo-translate] header here. Variables: ${langFrom}, ${langTo}."),
-          row("Prompt", f.prompt, "Sent as the user message. Variables: ${sourceText} (required), ${langFrom}, ${langTo}."),
-          el("div", { class: "tnRow" }, el("span"), el("label", { class: "tnCheck" }, f.stream, "Stream the response (stream)")),
-          row("Extra parameters", f.customParams, "A JSON object. Sent along with model, messages, temperature, and stream; the same names are overwritten."),
+          row(t("settings.temperature"), f.temperature),
+          row(t("settings.systemPrompt"), f.systemPrompt, t("settings.systemPromptHelp")),
+          row(t("settings.prompt"), f.prompt, t("settings.promptHelp")),
+          el("div", { class: "tnRow" }, el("span"), el("label", { class: "tnCheck" }, f.stream, t("settings.stream"))),
+          row(t("settings.customParams"), f.customParams, t("settings.customParamsHelp")),
         ),
-        el("h3", { text: "General" }),
+        el("h3", { text: t("settings.general") }),
         el(
           "fieldset",
           {},
-          row("Source language (${langFrom})", f.langFrom),
-          row("Target language (${langTo})", f.langTo),
-          row("Concurrent requests", f.concurrency, "1 to 8. Extra requests wait their turn."),
-          el("div", { class: "tnRow" }, el("span"), el("label", { class: "tnCheck" }, f.saveOnComment, "Save the PDF after putting a translation into a comment")),
+          row(t("settings.langFrom"), f.langFrom),
+          row(t("settings.langTo"), f.langTo),
+          row(t("settings.concurrency"), f.concurrency, t("settings.concurrencyHelp")),
+          el("div", { class: "tnRow" }, el("span"), el("label", { class: "tnCheck" }, f.saveOnComment, t("settings.saveOnComment"))),
+          row(t("settings.backupCount"), f.backupCount, t("settings.backupCountHelp")),
+          row(t("settings.uiLang"), f.uiLang, t("settings.uiLangHelp")),
+        ),
+        el("h3", { text: t("settings.selection") }),
+        el(
+          "fieldset",
+          {},
+          el("p", { class: "tnNote", text: t("settings.selectionNote") }),
+          el("div", { class: "tnRow" }, el("span"), el("label", { class: "tnCheck" }, f.skipFurniture, t("settings.skipFurniture"))),
+          row(t("settings.furnitureBand"), f.furnitureBand, t("settings.furnitureBandHelp")),
+          el("div", { class: "tnRow" }, el("span"), el("label", { class: "tnCheck" }, f.skipCaptions, t("settings.skipCaptions"))),
+          el("div", { class: "tnRow" }, el("span"), el("label", { class: "tnCheck" }, f.skipSmallText, t("settings.skipSmallText"))),
+          row(t("settings.sizeTolerance"), f.sizeTolerance, t("settings.sizeToleranceHelp")),
         ),
         f.error,
         el(
           "div",
           { class: "tnDialogButtons" },
-          el("button", { class: "tnBtn", type: "button", onclick: () => this.fill(structuredClone(this.defaults)) }, "Reset to Defaults"),
+          el("button", { class: "tnBtn", type: "button", onclick: () => this.fill(structuredClone(this.defaults)) }, t("settings.reset")),
           el("span", { class: "tnSpacer" }),
-          el("button", { class: "tnBtn", type: "button", onclick: () => this.dialog.close() }, "Cancel"),
-          el("button", { class: "tnBtn primary", type: "button", onclick: () => this.submit() }, "Save"),
+          el("button", { class: "tnBtn", type: "button", onclick: () => this.dialog.close() }, t("settings.cancel")),
+          el("button", { class: "tnBtn primary", type: "button", onclick: () => this.submit() }, t("settings.save")),
         ),
       ),
     );
@@ -137,6 +160,13 @@ export class SettingsDialog {
     f.langTo.value = this.draft.langTo;
     f.concurrency.value = this.draft.concurrency;
     f.saveOnComment.checked = !!this.draft.saveOnComment;
+    f.backupCount.value = this.draft.backupCount;
+    f.uiLang.value = this.draft.uiLang;
+    f.skipFurniture.checked = !!this.draft.skipFurniture;
+    f.furnitureBand.value = this.draft.furnitureBand;
+    f.skipCaptions.checked = !!this.draft.skipCaptions;
+    f.skipSmallText.checked = !!this.draft.skipSmallText;
+    f.sizeTolerance.value = this.draft.sizeTolerance;
     f.error.textContent = "";
     const idx = Math.max(0, this.draft.services.findIndex((s) => s.id === this.draft.activeService));
     this.renderList();
@@ -144,7 +174,7 @@ export class SettingsDialog {
   }
 
   renderList() {
-    this.f.serviceList.replaceChildren(...this.draft.services.map((s) => el("option", { text: s.name || "(no name)" })));
+    this.f.serviceList.replaceChildren(...this.draft.services.map((s) => el("option", { text: s.name || t("settings.noName") })));
     this.f.del.disabled = this.draft.services.length <= 1;
   }
 
@@ -190,7 +220,7 @@ export class SettingsDialog {
     this.readService();
     const base = copy ? structuredClone(this.svc()) : structuredClone(this.defaults.services[0]);
     base.id = `service-${Date.now().toString(36)}`;
-    base.name = copy ? `${base.name} (copy)` : "New service";
+    base.name = copy ? t("settings.copyName", { name: base.name }) : t("settings.newService");
     this.draft.services.push(base);
     this.renderList();
     this.selectService(this.draft.services.length - 1, false);
@@ -210,18 +240,17 @@ export class SettingsDialog {
     const s = this.svc();
     const r = this.f.testResult;
     r.className = "tnTestResult";
-    r.textContent = "Checking…";
+    r.textContent = t("settings.checking");
     try {
       const ids = await api.fetchModels({ endpoint: s.endpoint, apiKey: s.apiKey });
       this.f.modelList.replaceChildren(...ids.map((id) => el("option", { value: id })));
       const hit = pickModel(ids, s.model);
       r.classList.add("ok");
-      r.textContent =
-        `Connected. ${ids.length} models. ` +
-        (hit === s.model ? "This model is available" : hit ? `Similar name: ${hit} (enter it in the Model field)` : `"${s.model}" was not found`);
+      const key = hit === s.model ? "settings.connected.available" : hit ? "settings.connected.similar" : "settings.connected.missing";
+      r.textContent = tn(key, ids.length, { hit, model: s.model });
     } catch (e) {
       r.classList.add("error");
-      r.textContent = `Cannot connect: ${e.message}`;
+      r.textContent = t("settings.connectFailed", { message: e.message });
     }
   }
 
@@ -233,13 +262,22 @@ export class SettingsDialog {
       langTo: f.langTo.value,
       concurrency: f.concurrency.value,
       saveOnComment: f.saveOnComment.checked,
+      backupCount: f.backupCount.value,
+      uiLang: f.uiLang.value,
+      skipFurniture: f.skipFurniture.checked,
+      furnitureBand: f.furnitureBand.value,
+      skipCaptions: f.skipCaptions.checked,
+      skipSmallText: f.skipSmallText.checked,
+      sizeTolerance: f.sizeTolerance.value,
     });
     f.error.textContent = "";
     try {
       const saved = await api.putSettings(this.draft);
       this.ctx.applySettings(saved);
       this.dialog.close();
-      this.ctx.toast("Settings saved", "ok");
+      if (saved.uiLang === lang) this.ctx.toast(t("settings.saved"), "ok");
+      else if (this.ctx.canReload?.()) location.reload(); // 画面の言語は再読み込みで変わる
+      else this.ctx.toast(t("settings.uiLangLater"), "ok");
     } catch (e) {
       f.error.textContent = e.message;
     }

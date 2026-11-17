@@ -2,5 +2,5 @@
 
 APP_NAME = "PDF TransNote"
 APP_ID = "PdfTransNote"
-VERSION = "0.1.1"
+VERSION = "0.2.0"
 PDFJS_VERSION = "6.5.438"

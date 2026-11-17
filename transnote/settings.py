@@ -46,8 +46,19 @@ DEFAULTS: dict[str, Any] = {
     "concurrency": 2,  # 翻訳サーバーに同時に送る数（超えた分は画面の中で順番を待つ）
     "saveOnComment": True,  # 訳を注釈に入れたら PDF も保存する
     "lastColor": "#ffd400",  # 最後に使ったハイライトの色
+    "uiLang": "en",  # 画面の言語（en／ja）．PDF.js の画面も合わせる
+    # 選んだ文字のうち，本文に挟まれたものを除く（web/pdfjs/page-structure.mjs）
+    "skipFurniture": True,  # ヘッダー・フッター・ページ番号
+    "furnitureBand": 12,  # ヘッダー・フッターを探す，ページの上端・下端からの帯の幅（%）
+    "skipCaptions": True,  # 図表の見出し
+    "skipSmallText": True,  # 本文より小さい文字・回転した文字（脚注，表，図の中の文字）
+    "sizeTolerance": 6,  # 本文より何 % 小さければ「小さい」とするか
+    "popupWidth": 0,  # ポップアップの大きさ（px．0 は自動）
+    "popupHeight": 0,
+    "backupCount": 5,  # data/backups に残す数（すべての PDF をまとめて数える．0 なら取らない）
 }
 
+UI_LANGS = ("en", "ja")
 MAX_SERVICES = 20
 _ID_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 _COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
@@ -225,11 +236,52 @@ def validate(values: dict[str, Any], *, strict: bool = True) -> dict[str, Any]:
             raise SettingsError(f"Invalid color: {v}")
         return v.lower()
 
+    def ui_lang(v):
+        v = str(v).strip()
+        if v not in UI_LANGS:
+            raise SettingsError(f"Invalid display language: {v}")
+        return v
+
+    def int_range(name, lo, hi):
+        def check(v):
+            if isinstance(v, bool):
+                raise SettingsError(f"{name} must be a number")
+            try:
+                n = int(round(float(v)))
+            except (TypeError, ValueError):
+                raise SettingsError(f"{name} must be a number") from None
+            if not lo <= n <= hi:
+                raise SettingsError(f"{name} must be between {lo} and {hi}")
+            return n
+
+        return check
+
+    def popup_size(name):
+        """ポップアップの大きさ：0（自動）か 200〜4000 px．"""
+        inner = int_range(name, 0, 4000)
+
+        def check(v):
+            n = inner(v)
+            if 0 < n < 200:
+                raise SettingsError(f"{name} must be 0 or between 200 and 4000")
+            return n
+
+        return check
+
     take("langFrom", lang)
     take("langTo", lang)
     take("concurrency", concurrency)
     take("saveOnComment", _as_bool)
     take("lastColor", color)
+    take("uiLang", ui_lang)
+    take("skipFurniture", _as_bool)
+    take("furnitureBand", int_range("The header and footer band", 3, 25))
+    take("skipCaptions", _as_bool)
+    take("skipSmallText", _as_bool)
+    take("sizeTolerance", int_range("The size difference", 2, 30))
+    take("popupWidth", popup_size("The popup width"))
+    take("popupHeight", popup_size("The popup height"))
+    take("backupCount", int_range("Backups to keep", 0, 200))
     return out
 
 

@@ -1,5 +1,7 @@
 // PDF TransNote：画面の部品を作る小道具（pdf.js には触れない）
 
+import { t } from "./i18n.mjs";
+
 /** 要素を作る．props の class は className，on* はイベント，text は文字，それ以外は属性． */
 export function el(tag, props = {}, ...children) {
   const e = document.createElement(tag);
@@ -31,6 +33,9 @@ export const COLORS = [
   { value: "#f19837", name: "Orange" },
   { value: "#aaaaaa", name: "Gray" },
 ];
+
+/** 色の表示名（name は英語のまま持ち，画面の言語に訳す）． */
+export const colorLabel = (c) => t(`color.${c.name}`);
 
 /** 色を比べるための正規化（#RRGGBB の小文字）． */
 export const normColor = (c) => String(c ?? "").trim().toLowerCase();

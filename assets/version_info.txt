@@ -1,8 +1,8 @@
 # PyInstaller の --version-file 用（exe のプロパティの「詳細」に出る）．版を上げるときは build.ps1 が書き換える．
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(0, 1, 1, 0),
-    prodvers=(0, 1, 1, 0),
+    filevers=(0, 2, 0, 0),
+    prodvers=(0, 2, 0, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -15,11 +15,11 @@ VSVersionInfo(
       StringTable('041104B0', [
         StringStruct('CompanyName', 'PDF TransNote'),
         StringStruct('FileDescription', 'PDF TransNote - PDF viewer with translation notes'),
-        StringStruct('FileVersion', '0.1.1'),
+        StringStruct('FileVersion', '0.2.0'),
         StringStruct('InternalName', 'PdfTransNote'),
         StringStruct('OriginalFilename', 'PdfTransNote.exe'),
         StringStruct('ProductName', 'PDF TransNote'),
-        StringStruct('ProductVersion', '0.1.1')
+        StringStruct('ProductVersion', '0.2.0')
       ])
     ]),
     VarFileInfo([VarStruct('Translation', [0x0411, 1200])])

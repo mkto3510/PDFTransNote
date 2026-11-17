@@ -22,11 +22,21 @@ from typing import Any
 
 from . import APP_NAME, VERSION
 from . import paths
+from . import settings as settings_mod
+from .i18n import tr
 from .server import TransNoteServer
 
 log = logging.getLogger("transnote")
 
 DEBUG = os.environ.get("PDFTRANSNOTE_DEBUG") == "1" or "--debug" in sys.argv
+
+
+def _ui_lang(settings_path: Path | None = None) -> str:
+    """いまの設定の画面の言語（設定が変わることがあるので，表示のたびに読む）．"""
+    try:
+        return settings_mod.load(settings_path or paths.data_dir().settings).get("uiLang", "en")
+    except Exception:  # noqa: BLE001
+        return "en"
 
 
 def _message_box(text: str) -> None:
@@ -150,10 +160,11 @@ class Api:
         """ファイルを選ぶダイアログを出し，選んだ PDF を開く．開いた数を返す．"""
         import webview
 
+        lang = _ui_lang(self._app.data.settings)
         result = self._window.create_file_dialog(
             webview.FileDialog.OPEN,
             allow_multiple=True,
-            file_types=("PDF files (*.pdf)", "All files (*.*)"),
+            file_types=(tr(lang, "PDF files (*.pdf)"), tr(lang, "All files (*.*)")),
         )
         files = [str(p) for p in (result or [])]
         self._app.open_paths(files, reuse=self if not self._has_doc else None)
@@ -233,7 +244,11 @@ class TransNoteApp:
         def on_closing():
             if api._dirty:
                 return window.create_confirmation_dialog(
-                    APP_NAME, "There are unsaved changes or translations in progress. Close anyway?"
+                    APP_NAME,
+                    tr(
+                        _ui_lang(self.data.settings),
+                        "There are unsaved changes or translations in progress. Close anyway?",
+                    ),
                 )
             return True
 
@@ -252,7 +267,7 @@ class TransNoteApp:
             import webview
             from webview.dom import _dnd_state
         except Exception as e:  # noqa: BLE001
-            _message_box(f"Could not load the window component (pywebview).\n{e}")
+            _message_box(tr(_ui_lang(self.data.settings), f"Could not load the window component (pywebview).\n{e}"))
             return 1
 
         self.server = TransNoteServer(
@@ -282,8 +297,8 @@ class TransNoteApp:
         except Exception as e:  # noqa: BLE001
             log.exception("webview failed")
             _message_box(
-                "Could not open the window. Check that the Microsoft Edge WebView2 Runtime is installed.\n\n"
-                f"{e}"
+                tr(_ui_lang(self.data.settings), "Could not open the window. Check that the Microsoft Edge WebView2 Runtime is installed.\n\n"
+                f"{e}")
             )
             return 1
         finally:

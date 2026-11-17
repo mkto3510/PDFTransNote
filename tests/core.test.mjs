@@ -30,6 +30,8 @@ test("cleanSource：行末ハイフンの結合，合字，改行", () => {
   assert.equal(cleanSource("This transla-\ntion is ﬁne."), "This translation is fine.");
   assert.equal(cleanSource("the eﬀect of\r\nthe ﬂow"), "the effect of the flow");
   assert.equal(cleanSource("COVID-\n19 and Type-\nB"), "COVID-19 and Type-B");
+  // 単語の中でないハイフン（ページ番号の飾り）の後は，改行を空白にする
+  assert.equal(cleanSource("page 1.39\n- 2 -\nA Study"), "page 1.39 - 2 - A Study");
   assert.equal(cleanSource("  a  b\t c \n d  "), "a b c d");
   assert.equal(cleanSource("first para\nline two\n\n  \nsecond para"), "first para line two\n\nsecond para");
   assert.equal(cleanSource("soft­hyphen"), "softhyphen");

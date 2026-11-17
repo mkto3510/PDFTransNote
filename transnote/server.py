@@ -41,14 +41,15 @@ from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 from . import APP_NAME, VERSION
 from . import settings as settings_mod
+from .i18n import normalize_lang, tr
 
 log = logging.getLogger(__name__)
 
 TOKEN_HEADER = "X-TransNote-Token"
 FORCE_HEADER = "X-TransNote-Force"
+LANG_HEADER = "X-TransNote-Lang"
 MAX_PDF_BYTES = 2 * 1024**3  # 保存を受け付ける大きさの上限（2 GiB）
 MAX_JSON_BYTES = 4 * 1024**2
-MAX_BACKUPS = 200  # data/backups に残す数（古いものから消す）
 CHUNK = 1024 * 1024
 
 MIME_OVERRIDES = {
@@ -269,7 +270,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, {"app": APP_NAME, "version": VERSION})
             raise HttpError(404, "not found")
         except HttpError as e:
-            self._json(e.status, {"error": e.message, **e.extra})
+            self._json(e.status, {"error": tr(self._lang(), e.message), **e.extra})
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             pass  # 画面側が読み込みを止めた（ページ移動など）
         except Exception as e:  # noqa: BLE001
@@ -278,6 +279,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(500, {"error": f"{type(e).__name__}: {e}"})
             except OSError:
                 pass
+
+    def _lang(self) -> str:
+        """画面の言語（X-TransNote-Lang ヘッダー．ないとき・知らない値は en）．"""
+        return normalize_lang(self.headers.get(LANG_HEADER))
 
     # --- 守り ---
     def _check_host(self) -> None:
@@ -347,8 +352,13 @@ class Handler(BaseHTTPRequestHandler):
         pdf.js の起動（webviewerloaded）より先に設定を差し込める．
         """
         html = path.read_text(encoding="utf-8")
+        # 画面の言語は起動の前に決める（PDF.js は起動のときに言語を読み込む）
+        ui_lang = self.server.read_settings().get("uiLang", "en")
+        if ui_lang not in settings_mod.UI_LANGS:
+            ui_lang = "en"
         inject = (
             f'<meta name="transnote-token" content="{self.server.secret}" />\n'
+            f'    <meta name="transnote-ui-lang" content="{ui_lang}" />\n'
             '    <link rel="stylesheet" href="/transnote/pdfjs/overrides.css" />\n'
             '    <link rel="stylesheet" href="/transnote/app/app.css" />\n'
             '    <script src="/transnote/app/main.js" type="module"></script>\n    '
@@ -390,8 +400,9 @@ class Handler(BaseHTTPRequestHandler):
         if not body.startswith(b"%PDF-"):
             raise HttpError(400, "Not a PDF")
         force = (self.headers.get(FORCE_HEADER) or "") == "1"
+        keep = self.server.read_settings().get("backupCount", settings_mod.DEFAULTS["backupCount"])
         with doc.lock:
-            backup = save_pdf(doc, body, self.server.backups_dir, force=force)
+            backup = save_pdf(doc, body, self.server.backups_dir, force=force, keep=keep)
         self._json(200, {"ok": True, "size": len(body), "backup": str(backup) if backup else None})
 
     # --- 設定 ---
@@ -489,11 +500,12 @@ def _prune_backups(folder: Path, keep: int) -> None:
             pass
 
 
-def save_pdf(doc: Doc, data: bytes, backups_dir: Path, *, force: bool = False) -> Path | None:
+def save_pdf(doc: Doc, data: bytes, backups_dir: Path, *, force: bool = False, keep: int = 5) -> Path | None:
     """data を doc.path に保存する．
 
     - 開いた後（または前回の保存の後）にほかのアプリがファイルを変えていたら，force でない限り 409．
-    - この起動で初めて上書きするときは，元のファイルを backups_dir に複製する．
+    - この起動で初めて上書きするときは，元のファイルを backups_dir に複製し，
+      backups_dir の中を新しいものから keep 個に減らす（すべての PDF をまとめて数える）．keep が 0 なら複製しない．
     - 同じフォルダの一時ファイルに書いてから置き換える．置き換えられない（使用中）ときは 423．
     戻り値：作ったバックアップのパス（作らなかったときは None）．
     """
@@ -506,7 +518,7 @@ def save_pdf(doc: Doc, data: bytes, backups_dir: Path, *, force: bool = False) -
         raise ConflictError(409, "Another app has changed the file", reason="changed")
 
     backup = None
-    if st is not None and not doc.backed_up:
+    if st is not None and not doc.backed_up and keep > 0:
         backups_dir.mkdir(parents=True, exist_ok=True)
         stamp = time.strftime("%Y%m%d-%H%M%S")
         backup = backups_dir / f"{path.stem}.{stamp}.pdf"
@@ -516,7 +528,7 @@ def save_pdf(doc: Doc, data: bytes, backups_dir: Path, *, force: bool = False) -
             n += 1
         shutil.copy2(path, backup)
         doc.backed_up = True
-        _prune_backups(backups_dir, MAX_BACKUPS)
+        _prune_backups(backups_dir, keep)
 
     tmp = path.with_name(f".{path.name}.transnote-tmp")
     try:

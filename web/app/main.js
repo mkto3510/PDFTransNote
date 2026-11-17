@@ -3,7 +3,7 @@
 // サーバーが viewer.html の viewer.mjs より前に差し込む．bridge.js を import するので，
 // bridge が pdf.js の起動前に「webviewerloaded」を待ち受けられる．
 // このファイルと web/app/ の他のファイルは，pdf.js の名前に触れない（bridge だけを使う）．
-// 画面の文は英語（訳文は日本語）．
+// 画面の文は i18n.mjs（英語と日本語）．
 
 import { bridge } from "../pdfjs/bridge.js";
 import * as api from "./api.js";
@@ -11,10 +11,28 @@ import { chatRequest, cleanSource, translate } from "./core.mjs";
 import { toast as showToast } from "./dom.js";
 import { JobQueue, SaveScheduler } from "./jobs.mjs";
 import { Popup } from "./popup.js";
+import { t } from "./i18n.mjs";
 import { SettingsDialog } from "./settings-dialog.js";
 import { AnnotationSidebar } from "./sidebar.js";
 
-const FALLBACK = { services: [], activeService: "", lastColor: "#ffd400", saveOnComment: true, concurrency: 2, langFrom: "en", langTo: "ja" };
+const FALLBACK = {
+  services: [],
+  activeService: "",
+  lastColor: "#ffd400",
+  saveOnComment: true,
+  concurrency: 2,
+  langFrom: "en",
+  langTo: "ja",
+  skipFurniture: true,
+  furnitureBand: 12,
+  skipCaptions: true,
+  skipSmallText: true,
+  sizeTolerance: 6,
+  popupWidth: 0,
+  popupHeight: 0,
+  uiLang: "en",
+  backupCount: 5,
+};
 
 let settings = null;
 let popup = null;
@@ -30,6 +48,13 @@ const toast = (text, kind) => showToast(bridge.overlayParent(), text, kind);
 function applySettings(s) {
   settings = s;
   queue.setLimit(Number(s.concurrency) || 1);
+  bridge.setSelectionFilter?.({
+    skipFurniture: s.skipFurniture,
+    furnitureBand: s.furnitureBand,
+    skipCaptions: s.skipCaptions,
+    skipSmallText: s.skipSmallText,
+    sizeTolerance: s.sizeTolerance,
+  });
   popup?.refresh();
 }
 
@@ -40,12 +65,14 @@ async function updateSettings(patch) {
   try {
     applySettings(await api.putSettings({ ...settings, ...patch }));
   } catch (e) {
-    toast(`Could not save the settings: ${e.message}`, "error");
+    toast(t("settings.saveFailed", { message: e.message }), "error");
   }
 }
 
 const rememberColor = (color) => settings && settings.lastColor !== color && updateSettings({ lastColor: color });
 const setActiveService = (id) => updateSettings({ activeService: id });
+/** 浮かせたポップアップの大きさを覚える（0，0 なら自動）． */
+const rememberPopupSize = (w, h) => updateSettings({ popupWidth: w, popupHeight: h });
 
 // ---------------------------------------------------------------------------
 // 翻訳の列
@@ -71,7 +98,7 @@ const queue = new JobQueue({ run: runJob, limit: 2, onChange: () => sidebar?.upd
 async function saveToFile({ force = false, manual = false } = {}) {
   if (!bridge.hasDocument()) return;
   if (!bridge.hasChanges()) {
-    if (manual) toast("There are no changes to save");
+    if (manual) toast(t("save.noChanges"));
     return;
   }
   bridge.setBusy(true);
@@ -79,15 +106,15 @@ async function saveToFile({ force = false, manual = false } = {}) {
     const data = await bridge.saveData();
     const { status, ok, info } = await api.putPdf(bridge.docUrl(), data, force);
     if (status === 409 && !force) {
-      if (confirm("Another app has changed this PDF. Overwrite it?")) return await saveToFile({ force: true, manual });
-      toast("Save canceled", "error");
+      if (confirm(t("save.conflict"))) return await saveToFile({ force: true, manual });
+      toast(t("save.canceled"), "error");
       return;
     }
     if (!ok) throw new Error(info.error || `${status}`);
     bridge.markSaved();
-    toast(info.backup ? "Saved (the original file was copied to data\\backups)" : "Saved", "ok");
+    toast(info.backup ? t("save.doneBackup") : t("save.done"), "ok");
   } catch (e) {
-    toast(`Could not save: ${e.message}`, "error");
+    toast(t("save.failed", { message: e.message }), "error");
     throw e;
   } finally {
     bridge.setBusy(false);
@@ -121,7 +148,7 @@ function startAutoJob(target, source) {
 function reportFailure(job) {
   if (job.meta.notified) return;
   job.meta.notified = true;
-  toast(`Translation failed: ${job.error}`, "error");
+  toast(t("job.failed", { message: job.error }), "error");
   if (!bridge.isSidebarVisible()) bridge.setSidebarAlert(true);
 }
 
@@ -137,7 +164,7 @@ async function onAutoJobChange(job) {
     queue.remove(job); // 訳はカードのコメントに出る
   } else {
     job.status = "error";
-    job.error = "The highlight is gone";
+    job.error = t("job.highlightGone");
     reportFailure(job);
     sidebar?.updateJobs();
   }
@@ -148,7 +175,7 @@ async function annotateAndTranslate(anchor, color, source) {
   rememberColor(color);
   bridge.clearSelection();
   const target = await bridge.createHighlight(anchor, color);
-  if (!target) return toast("Could not create a highlight (select some text)", "error");
+  if (!target) return toast(t("annotate.createFailed"), "error");
   startAutoJob(target, source);
 }
 
@@ -157,7 +184,7 @@ async function changeColor(target, color) {
 }
 
 async function deleteHighlight(target) {
-  for (const j of queue.jobs) if (!j.finished && bridge.sameTarget(j.meta.target, target)) j.cancel();
+  for (const j of queue.jobs) if (!j.finished && bridge.sameGroup(j.meta.target, target)) j.cancel();
   if (await bridge.remove(target)) requestSave();
 }
 
@@ -165,7 +192,7 @@ async function deleteHighlight(target) {
 async function saveComment(target, text) {
   bridge.scrollTo(target);
   if (await bridge.setComment(target, text)) requestSave();
-  else toast("Could not write the comment (the highlight is gone)", "error");
+  else toast(t("comment.writeFailed"), "error");
 }
 
 // ---------------------------------------------------------------------------
@@ -179,6 +206,7 @@ const ctx = {
   settings: () => settings ?? FALLBACK,
   setActiveService,
   rememberColor,
+  rememberPopupSize,
   annotateAndTranslate,
   startAutoJob,
   commitTranslation,
@@ -200,8 +228,11 @@ const ctx = {
   popupClosed: (p) => {
     if (popup !== p) return;
     popup = null;
+    sidebar?.clearDock();
     sidebar?.select(null);
   },
+  /** 左のパネルに付けた注釈ポップアップがあれば閉じる． */
+  closeDocked: () => popup?.docked && popup.close(),
   openEditor: (job) => openPopup({ target: job.meta.target, job }),
   /** カードから：そのハイライトへ移動して，注釈ポップアップを開く． */
   openHighlight: (target) => {
@@ -210,21 +241,36 @@ const ctx = {
   },
 };
 
+/**
+ * ポップアップを開く．既存のハイライトで左のパネルの Annotations が見えていれば，そのカードの下に付ける．
+ * そうでなければ（新しい選択も）浮かせる．
+ */
 function openPopup(options) {
+  const { target, job } = options;
+  // 付いているカードをもう一度押しただけなら，開き直さない（入力中の文字を残す）
+  if (target && !job && popup?.docked && sidebar?.dockKey === bridge.keyOf(target)) return;
   popup?.close();
-  popup = new Popup(ctx, options);
-  if (options.target) sidebar?.select(options.target);
+  let dock = null;
+  if (target && bridge.isSidebarVisible()) dock = sidebar?.dockHost(target) ?? null;
+  popup = new Popup(ctx, dock ? { ...options, dock } : options);
+  if (target) sidebar?.select(target);
+  if (dock) sidebar.revealDock();
 }
 
 function bindPopupEvents() {
   bridge.on("selection", (anchor) => openPopup({ anchor }));
   bridge.on("highlightClick", (target) => openPopup({ target }));
   bridge.on("layout", () => popup?.place());
+  bridge.on("sidebarView", (visible) => !visible && popup?.docked && popup.close());
+  bridge.on("notice", (code, data) => {
+    if (code === "selectionTooLong") toast(t("notice.selectionTooLong", { n: data?.maxPages ?? 3 }));
+    else if (code === "highlightPartsFailed") toast(t("notice.highlightPartsFailed", { failed: data?.failed, total: data?.total }), "error");
+  });
   // ポップアップの外を押したら閉じる（新しい選択やハイライトのクリックなら，その後で開き直す）
   document.addEventListener(
     "pointerdown",
     (e) => {
-      if (popup && !popup.root.contains(e.target)) popup.close();
+      if (popup && !popup.root.contains(e.target) && !(popup.docked && sidebar?.inDock(e.target))) popup.close();
     },
     true,
   );
@@ -265,18 +311,22 @@ function reportDirty(force = false) {
   api.setDirty(dirty);
 }
 
+/** 画面の言語を変えるために再読み込みしてよいか（保存していない変更も，翻訳中のものも，未確定の訳文もない）． */
+const canReload = () => !bridge.isModified() && !queue.busy && !popup?.holdsWork;
+
 // ---------------------------------------------------------------------------
 // 起動
 // ---------------------------------------------------------------------------
 
 bridge.on("ready", async () => {
   sidebar = new AnnotationSidebar(ctx);
-  settingsDialog = new SettingsDialog({ toast, applySettings });
-  bridge.addToolbarButton({ id: "transnoteGear", title: "PDF TransNote settings", onClick: () => settingsDialog.open() });
-  bridge.setSaveButtonTitle("Save to the original PDF (Ctrl+S)");
+  settingsDialog = new SettingsDialog({ toast, applySettings, canReload });
+  bridge.addToolbarButton({ id: "transnoteGear", title: t("app.settingsTitle"), onClick: () => settingsDialog.open() });
+  bridge.setSaveButtonTitle(t("app.saveTitle"));
+  bridge.setSidebarOptionLabel(t("sidebar.optionLabel"));
   bridge.setSaveHandler(async ({ manual }) => {
     if (!bridge.hasChanges()) {
-      if (manual) toast("There are no changes to save");
+      if (manual) toast(t("save.noChanges"));
       return;
     }
     await saver.request();
@@ -284,7 +334,7 @@ bridge.on("ready", async () => {
   if (api.inDesktop) {
     bridge.setOpenHandler(() => api.openDialog());
     bridge.setDropHandler(async (files) => {
-      if (!(await api.openDropped(files))) toast("Drop a PDF file", "error");
+      if (!(await api.openDropped(files))) toast(t("app.dropPdf"), "error");
     });
   }
   bindPopupEvents();
@@ -294,5 +344,5 @@ bridge.on("ready", async () => {
   } catch (e) {
     toast(e.message, "error");
   }
-  if (!bridge.docUrl()) toast("Open a PDF with Open (Ctrl+O) or drop one onto the window");
+  if (!bridge.docUrl()) toast(t("app.openHint"));
 });

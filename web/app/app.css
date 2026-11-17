@@ -132,6 +132,78 @@
   }
 }
 
+/* 大きさを変えた後：高さは固定．原文の欄と訳文の欄が残りの高さを分け合う */
+.tnPopup.sized {
+  overflow: hidden;
+
+  > .tnSource {
+    flex: 1 1 0;
+    min-height: 3em;
+    max-height: none;
+    resize: none;
+  }
+  > .tnResult {
+    flex: 1 1 0;
+    min-height: 0;
+
+    .tnOutput {
+      flex: 1 1 0;
+      min-height: 3em;
+      max-height: none;
+      resize: none;
+    }
+  }
+  > .tnComment,
+  > .tnColors,
+  > .tnBtn,
+  > .tnStatus,
+  > .tnFooter,
+  > .tnSkipped {
+    flex: none;
+  }
+}
+/* 右下の持ち手 */
+.tnGrip {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 16px;
+  height: 16px;
+  cursor: nwse-resize;
+  touch-action: none;
+  border-end-end-radius: var(--tn-radius);
+  background: linear-gradient(135deg, transparent 0 50%, var(--tn-fg-weak) 50% 58%, transparent 58% 68%, var(--tn-fg-weak) 68% 76%, transparent 76%);
+  opacity: 0.6;
+
+  &:hover {
+    opacity: 1;
+  }
+}
+/* 左のパネルのカードの下に付けた注釈ポップアップ */
+.tnCardDock {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--tn-separator);
+}
+.tnPopup.docked {
+  position: static;
+  width: 100%;
+  max-width: none;
+  padding: 0;
+  background: none;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+}
+.tnSource,
+.tnOutput {
+  box-sizing: border-box;
+}
+.tnSkipped {
+  font-size: 12px;
+  color: var(--tn-fg-weak);
+}
+
 .tnColors {
   display: flex;
   justify-content: space-between;
@@ -435,6 +507,11 @@
     padding: 10px 12px;
     border: 1px solid var(--tn-separator);
     border-radius: 4px;
+  }
+  /* 節の初めの説明 */
+  .tnNote {
+    margin: 0 0 8px;
+    color: var(--tn-fg-weak);
   }
   input:not([type="checkbox"]),
   select,
