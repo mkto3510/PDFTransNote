@@ -41,20 +41,31 @@ const near = (a, b, tol) => Math.abs(a - b) <= tol * Math.max(a, b);
 const CAPTION_LABEL = String.raw`(?:(?:(?:Supplementary|SUPPLEMENTARY|Extended\s+Data|EXTENDED\s+DATA)\s+)?(?:Fig(?:ure)?\.?|FIG(?:URE)?\.?|Table|TABLE|Scheme|SCHEME|Chart|CHART|Plate|PLATE|Algorithm|ALGORITHM|Listing|LISTING)|図|表)`;
 const CAPTION_NUMBER = String.raw`S?(?:[0-9０-９]+(?:[.．][0-9０-９]+)*[a-zA-Z]?|[IVXLC]+)`;
 const CAPTION_RE = new RegExp(String.raw`^${CAPTION_LABEL}\s*(${CAPTION_NUMBER})(.*)$`, "su");
+// 日本の雑誌に多い「第 1 図」「第 2 表」（番号が前に来る）
+const JP_DAI_RE = /^第\s*([0-9０-９]+(?:[.．\-－‐][0-9０-９]+)*)\s*[図表](.*)$/su;
 const CAPTION_DELIM_RE = /^\s*[.:|．：—–-]/;
+// 日本語の見出しの番号の後に続く助詞（本文の「図 1 に示す」「第 2 表の値」）．1 文字の助詞は，後にひらがなが続かないときだけ
+// （「図 3 つくばの…」のように，ひらがなで始まる題を本文と取り違えないため）
+const JP_PARTICLE_RE =
+  /^\s*(?:から|まで|より|では|には|とは|および|ならびに|について|による|のよう|のとおり|と同様|[にのはをでとがへやも](?!\p{Script=Hiragana}))/u;
 
 /**
- * 行の頭がキャプションの形（Fig. 3: …，Table 2，図 1．… など）か．
+ * 行の頭がキャプションの形（Fig. 3: …，Table 2，図 1．…，第 1 図 … など）か．
  * 番号の後に区切り（. : | ． ： — – -）があるか，行が「TABLE I」のように見出しと番号だけなら "strict"．
  * 区切りがなければ（Springer の「Fig. 1 Title」や，本文の「Figure 3 shows …」）"loose"．形でなければ null．
+ * 日本語の見出し（図，表，第 N 図）の番号の後が助詞なら，本文（「図 1 に示す」「第 2 表の値」）なので null．
  * @param {string} text
  * @returns {"strict" | "loose" | null}
  */
 export function matchCaption(text) {
-  const m = CAPTION_RE.exec(collapse(text));
-  if (!m) return null;
-  const rest = m[2];
-  if (/^[A-Za-z0-9]/.test(rest)) return null; // 「Table Iteration」「Fig. 3and」は見出しではない
+  const t = collapse(text);
+  const dai = JP_DAI_RE.exec(t);
+  const m = dai ? null : CAPTION_RE.exec(t);
+  if (!dai && !m) return null;
+  const rest = dai ? dai[2] : m[2];
+  const japanese = !!dai || /^[図表]/.test(t);
+  if (japanese && JP_PARTICLE_RE.test(rest)) return null;
+  if (!japanese && /^[A-Za-z0-9]/.test(rest)) return null; // 「Table Iteration」「Fig. 3and」は見出しではない
   if (!rest.trim() || CAPTION_DELIM_RE.test(rest)) return "strict";
   return "loose";
 }
