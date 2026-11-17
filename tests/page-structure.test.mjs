@@ -169,13 +169,17 @@ test("Artifact の中の文字は除外（入れ子も数える）", () => {
 // --- キャプション ---
 test("matchCaption：strict・loose・形でないもの", () => {
   for (const s of ["Figure 3: Overview", "Fig. 2. Results", "TABLE I", "Table 2", "図 1．システムの構成", "表2：結果",
-    "Figure S1. Extra", "Fig. 3a: Detail", "Table 1.2 — Values", "Supplementary Figure 4: More", "Algorithm 1 |"]) {
+    "Figure S1. Extra", "Fig. 3a: Detail", "Table 1.2 — Values", "Supplementary Figure 4: More", "Algorithm 1 |",
+    "第1図．調査地域の地質図", "第 2 表：試料の一覧", "第3-1図. 断面"]) {
     assert.equal(matchCaption(s), "strict", s);
   }
-  for (const s of ["Fig. 1 Overview of the pipeline", "Figure 3 shows that the model", "図1は構成を示す"]) {
+  for (const s of ["Fig. 1 Overview of the pipeline", "Figure 3 shows that the model", "図１　調査地域の地質図", "第1図　調査地域の地質図",
+    "図 3.10 つくばと水沢の観測点の位置", "表 4 とかち平野の試料"]) {
     assert.equal(matchCaption(s), "loose", s);
   }
-  for (const s of ["Figures 3 and 4 show", "Table of Contents", "Tablet 3", "Table Iteration counts", "In Figure 3: x"]) {
+  // 図・表の番号の後が助詞なら本文（「図 1 に示す」）
+  for (const s of ["Figures 3 and 4 show", "Table of Contents", "Tablet 3", "Table Iteration counts", "In Figure 3: x",
+    "図1は構成を示す", "図 2 に示すように", "表3の値は", "図 5 のように", "第1図に示すように", "第 2 表の結果から", "図 6 では"]) {
     assert.equal(matchCaption(s), null, s);
   }
 });
