@@ -37,6 +37,18 @@ def _message_box(text: str) -> None:
         print(text, file=sys.stderr)
 
 
+# インストーラー（installer/PdfTransNote.iss の AppMutex）が「動いているか」を調べるための名前付きミューテックス
+APP_MUTEX = "PdfTransNote.AppMutex"
+
+
+def _hold_app_mutex() -> int | None:
+    """APP_MUTEX を作って持ち続ける（プロセスが終わると OS が閉じる）．"""
+    try:
+        return ctypes.windll.kernel32.CreateMutexW(None, False, APP_MUTEX) or None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _pdf_args(argv: list[str]) -> list[str]:
     out = []
     for a in argv:
@@ -173,6 +185,7 @@ class TransNoteApp:
         self.data = paths.data_dir()
         self.server: TransNoteServer | None = None
         self.ipc: IpcListener | None = None
+        self._mutex: int | None = None
         self._started = threading.Event()
         self._windows_lock = threading.Lock()
 
@@ -231,6 +244,7 @@ class TransNoteApp:
         pdfs = _pdf_args(argv[1:])
         if send_to_running(self.data.ipc, pdfs):
             return 0
+        self._mutex = _hold_app_mutex()
         self._setup_logging()
         log.info("%s %s start (data=%s, portable=%s)", APP_NAME, VERSION, self.data.path, self.data.portable)
 

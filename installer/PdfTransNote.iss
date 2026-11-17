@@ -1,15 +1,17 @@
 ﻿; PDF TransNote のインストーラー（Inno Setup 7）
 ; ===========================================================================
-; ポータブルアプリとして配る：
-;   - 管理者権限なしで入れる（PrivilegesRequired=lowest）．置き場所は自由に選べる（USB メモリなども可）．
-;   - アンインストーラーも「アプリと機能」への登録も作らず，レジストリに書かない．消すときはフォルダごと削除する．
+; 方針：
+;   - 管理者権限なしで入れる（PrivilegesRequired=lowest）．置き場所は自由に選べる．
+;   - アンインストーラーを作り，今のユーザーの範囲（HKCU）だけに登録する．Windows の「設定 → アプリ」から消せる．
 ;   - 設定などはアプリのフォルダの data\ に置く（アプリ側の仕組み）．上書きで入れ直しても data\ は残る．
-; 作り方：build.ps1 から ISCC.exe /DAppVersion=0.1.0 installer\PdfTransNote.iss
+;     アンインストールのときは，data\ も消すかを尋ねる（既定は「残す」．サイレントのときは尋ねずに残す）．
+;   - レジストリをまったく使わないポータブル版は，build.ps1 が作る zip のほう．
+; 作り方：build.ps1 から ISCC.exe /DAppVersion=0.1.1 installer\PdfTransNote.iss
 
 #define AppName "PDF TransNote"
 #define AppExe "PdfTransNote.exe"
 #ifndef AppVersion
-  #define AppVersion "0.1.0"
+  #define AppVersion "0.1.1"
 #endif
 #define SourceDir "..\dist\PdfTransNote"
 
@@ -21,11 +23,12 @@ AppVerName={#AppName} {#AppVersion}
 AppPublisher={#AppName}
 VersionInfoVersion={#AppVersion}
 VersionInfoDescription={#AppName} Setup
-; ポータブル：権限・登録・アンインストーラー
+; 権限とアンインストーラー（HKCU に登録）
 PrivilegesRequired=lowest
-Uninstallable=no
-CreateUninstallRegKey=no
-UsePreviousAppDir=no
+UninstallDisplayName={#AppName}
+UninstallDisplayIcon={app}\{#AppExe}
+; 更新のときは前と同じフォルダに入れる
+UsePreviousAppDir=yes
 UsePreviousGroup=no
 UsePreviousTasks=no
 UsePreviousSetupType=no
@@ -47,6 +50,8 @@ Compression=lzma2/max
 SolidCompression=yes
 ; 動いている PDF TransNote があれば閉じてから入れ替える
 CloseApplications=yes
+; アプリが動いていれば，インストールとアンインストールの前に閉じるよう求める（transnote/app.py の APP_MUTEX）
+AppMutex=PdfTransNote.AppMutex
 RestartApplications=no
 
 [Languages]
@@ -95,4 +100,34 @@ begin
       'It is required to display the PDF TransNote window.' + #13#10 +
       'Please install it from https://developer.microsoft.com/microsoft-edge/webview2/' + #13#10#13#10 +
       'Continue anyway?', mbConfirmation, MB_YESNO) = IDYES;
+end;
+
+// アンインストールの最後に，設定とバックアップ（data）も消すかを尋ねる．
+// 代わりの置き場所 %LOCALAPPDATA%\PdfTransNote（transnote/paths.py の data_dir()）も対象にする．
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  AppData, LocalData, Found: String;
+begin
+  if CurUninstallStep <> usPostUninstall then
+    Exit;
+  AppData := ExpandConstant('{app}\data');
+  LocalData := ExpandConstant('{localappdata}\PdfTransNote');
+  Found := '';
+  if DirExists(AppData) then
+    Found := Found + #13#10 + '  ' + AppData;
+  if DirExists(LocalData) then
+    Found := Found + #13#10 + '  ' + LocalData;
+  if (Found <> '') and not UninstallSilent then
+  begin
+    if MsgBox('Also delete your settings and PDF backups?' + #13#10 + Found + #13#10#13#10 +
+      'Settings include API keys. Choose No to keep them for a later reinstall.',
+      mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES then
+    begin
+      if DirExists(AppData) then
+        DelTree(AppData, True, True, True);
+      if DirExists(LocalData) then
+        DelTree(LocalData, True, True, True);
+    end;
+  end;
+  RemoveDir(ExpandConstant('{app}'));
 end;
