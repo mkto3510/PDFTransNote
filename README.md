@@ -1,6 +1,6 @@
 # PDF TransNote
 
-PDF の英文を選んで，翻訳の前に原文を直し，ローカル LLM（LM Studio など）で和訳して，ハイライトのコメントとして PDF に保存するビューアです．表示には Mozilla の [PDF.js](https://mozilla.github.io/pdf.js/) 6.5.438 を使い，Windows のデスクトップアプリ（Edge WebView2）として動きます．ポータブルアプリなので，レジストリは使いません．
+PDF の英文を選んで，翻訳の前に原文を直し，ローカル LLM（LM Studio など）で和訳して，ハイライトのコメントとして PDF に保存するビューアです．表示には Mozilla の [PDF.js](https://mozilla.github.io/pdf.js/) 6.5.438 を使い，Windows のデスクトップアプリ（Edge WebView2）として動きます．
 
 画面の言語は英語です（PDF.js の部分も含みます）．訳文は設定の翻訳先の言語（既定は日本語）になります．以下では，画面の名前を英語のまま書きます．
 
@@ -10,8 +10,8 @@ PDF の英文を選んで，翻訳の前に原文を直し，ローカル LLM（
 
 [Releases](https://github.com/mkto3510/PDFTransNote/releases) から，次のどちらかを取ってきます．
 
-- `PdfTransNote-<版>-setup.exe`：インストーラー．管理者の権限は要りません．
-- `PdfTransNote-<版>-portable.zip`：解凍するだけで使えます．
+- `PdfTransNote-<版>-setup.exe`：インストーラー．管理者の権限は要りません．Windows の「設定 → アプリ」から消せるように，アンインストーラーを今のユーザーの範囲だけに登録します．新しい版は，前と同じフォルダに上書きで入れられます．
+- `PdfTransNote-<版>-portable.zip`：ポータブル版．解凍するだけで使えます．レジストリは使いません．
 
 動作環境は 64 ビット版の Windows 10・11 です．画面の表示に Microsoft Edge WebView2 ランタイムを使います（Windows 11 には標準で入っています）．
 
@@ -129,7 +129,12 @@ Zotero の「編集 → 設定 → 一般 → リーダー」にある「PDF 文
 | `webview\` | WebView2 の表示用データ |
 | `transnote.log` | 動作の記録 |
 
-そこに書き込めないときだけ，`%LOCALAPPDATA%\PdfTransNote` を使います．消すときは，アプリのフォルダごと削除してください．
+そこに書き込めないときだけ，`%LOCALAPPDATA%\PdfTransNote` を使います．
+
+消すときは，次のようにします．
+
+- setup.exe で入れた場合：Windows の「設定 → アプリ → インストールされているアプリ」で PDF TransNote をアンインストールします．最後に `data` フォルダ（設定とバックアップ）も消すかを尋ねます．既定は「残す」です．
+- zip の場合：アプリのフォルダごと削除します．
 
 ## ソースから作る
 

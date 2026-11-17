@@ -1,8 +1,9 @@
 ﻿PDF TransNote has been installed.
 
-[Portable app]
+[Settings and uninstall]
 - Settings and backups are stored in the "data" folder inside the install folder.
-- There is no uninstaller. To remove the app, delete the install folder.
+- To remove the app, use Windows Settings -> Apps -> Installed apps -> PDF TransNote -> Uninstall.
+  The uninstaller asks whether to delete the "data" folder too (default: keep it).
 
 [Open PDFs from Zotero]
 In Zotero, go to Edit -> Settings -> General -> Reader -> "Open PDFs using",
