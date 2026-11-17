@@ -47,7 +47,8 @@ export function cleanSource(text) {
     .replace(/­/g, "")
     .replace(/[ﬀ-ﬆ]/g, (c) => LIGATURES[c] ?? c);
   s = s.replace(/(\p{L})[-‐][ \t]*\n[ \t]*(?=\p{Ll})/gu, "$1");
-  s = s.replace(/([-‐])[ \t]*\n[ \t]*(?=[\p{Lu}\p{N}])/gu, "$1");
+  // 単語の中のハイフン（前が文字か数字）のときだけ．"- 2 -\nA Study"（ページ番号と次のページのヘッダー）はつながない
+  s = s.replace(/(?<=[\p{L}\p{N}])([-‐])[ \t]*\n[ \t]*(?=[\p{Lu}\p{N}])/gu, "$1");
   s = s
     .replace(/\n[ \t]*\n[\s]*/g, "\u0000")
     .replace(/[ \t]*\n[ \t]*/g, " ")

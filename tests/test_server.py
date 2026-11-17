@@ -14,6 +14,7 @@ from pathlib import Path
 from unittest import mock
 
 from transnote import paths, settings
+from transnote.i18n import CATALOGUE, tr
 from transnote.server import TOKEN_HEADER, FORCE_HEADER, TransNoteServer
 
 PDF_BYTES = b"%PDF-1.4\n" + bytes(range(256)) * 40 + b"\n%%EOF\n"
@@ -135,6 +136,14 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(resp.status, 200)
         self.assertEqual(resp.getheader("Content-Type"), "text/javascript")
 
+    def test_viewer_ui_language(self):
+        # 既定は英語．設定を日本語にすると，次に読み込んだ viewer.html から日本語になる
+        _, data = self.request("GET", "/pdfjs/web/viewer.html")
+        self.assertIn('<meta name="transnote-ui-lang" content="en" />', data.decode())
+        settings.save(self.settings_path, dict(settings.defaults(), uiLang="ja"))
+        _, data = self.request("GET", "/pdfjs/web/viewer.html")
+        self.assertIn('<meta name="transnote-ui-lang" content="ja" />', data.decode())
+
     # --- 保存 ---
     def test_save_requires_token(self):
         new = PDF_BYTES + b"% edited\n"
@@ -163,6 +172,29 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(resp.status, 200)
         self.assertEqual(self.pdf.read_bytes(), newer)
         self.assertEqual(len(list(self.backups.glob("*.pdf"))), 1)
+
+    def test_backup_count(self):
+        # 残す数は設定の backupCount（すべての PDF をまとめて，新しいものから数える）
+        settings.save(self.settings_path, dict(settings.defaults(), backupCount=2))
+        self.backups.mkdir(parents=True, exist_ok=True)
+        for i in range(3):
+            old = self.backups / f"old{i}.20200101-00000{i}.pdf"
+            old.write_bytes(PDF_BYTES)
+            os.utime(old, (1_600_000_000 + i, 1_600_000_000 + i))
+        resp, data = self.request("PUT", self.doc.url, body=PDF_BYTES + b"% edited\n", headers=self.auth())
+        self.assertEqual(resp.status, 200, data)
+        names = sorted(p.name for p in self.backups.glob("*.pdf"))
+        self.assertEqual(len(names), 2)
+        self.assertIn("old2.20200101-000002.pdf", names)  # 古いものから消える
+        self.assertTrue(json.loads(data)["backup"])
+
+    def test_backup_disabled(self):
+        settings.save(self.settings_path, dict(settings.defaults(), backupCount=0))
+        resp, data = self.request("PUT", self.doc.url, body=PDF_BYTES + b"% edited\n", headers=self.auth())
+        self.assertEqual(resp.status, 200, data)
+        self.assertIsNone(json.loads(data)["backup"])
+        self.assertEqual(list(self.backups.glob("*.pdf")), [])
+        self.assertEqual(self.pdf.read_bytes(), PDF_BYTES + b"% edited\n")
 
     def test_save_rejects_non_pdf(self):
         resp, _ = self.request("PUT", self.doc.url, body=b"hello", headers=self.auth())
@@ -296,6 +328,61 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(resp.status, 502)
         self.assertIn("Cannot reach", json.loads(data)["error"])
 
+    def test_errors_follow_language_header(self):
+        body = json.dumps(dict(settings.defaults(), concurrency=99)).encode()
+        resp, data = self.request("PUT", "/api/settings", body=body, headers=self.auth({"X-TransNote-Lang": "ja"}))
+        self.assertEqual(resp.status, 400)
+        self.assertEqual(json.loads(data)["error"], "同時に送る要求の数は 1 から 8 までにしてください．")
+        for h in ({}, {"X-TransNote-Lang": "fr"}):
+            resp, data = self.request("PUT", "/api/settings", body=body, headers=self.auth(h))
+            self.assertEqual(json.loads(data)["error"], "Concurrent requests must be between 1 and 8")
+
+        base = settings.defaults()
+        svc = dict(base["services"][0], id="dead", endpoint="http://127.0.0.1:9")
+        settings.save(self.settings_path, dict(base, services=[svc], activeService="dead"))
+        resp, data = self.request("POST", "/llm/chat?service=dead", body=b"{}",
+                                  headers=self.auth({"X-TransNote-Lang": "ja"}))
+        self.assertEqual(resp.status, 502)
+        err = json.loads(data)["error"]
+        self.assertIn("翻訳サーバー（http://127.0.0.1:9）に接続できません：", err)
+        self.assertNotIn("Cannot reach", err)
+
+        resp, data = self.request("POST", "/llm/chat?service=nope", body=b"{}",
+                                  headers=self.auth({"X-TransNote-Lang": "ja"}))
+        self.assertIn("「nope」", json.loads(data)["error"])
+
+    def test_nested_service_error_in_japanese(self):
+        lan = dict(settings.defaults()["services"][0], name="My LLM", model="")
+        body = json.dumps(dict(settings.defaults(), services=[lan])).encode()
+        resp, data = self.request("PUT", "/api/settings", body=body, headers=self.auth({"X-TransNote-Lang": "ja"}))
+        self.assertEqual(json.loads(data)["error"], "サービス 1（My LLM）：モデルを入力してください．")
+
+
+
+class I18nTest(unittest.TestCase):
+    def test_every_catalogue_entry(self):
+        import re
+
+        for pattern, ja, sample in CATALOGUE:
+            with self.subTest(sample=sample):
+                self.assertTrue(re.fullmatch(pattern, sample, re.DOTALL), sample)
+                out = tr("ja", sample)
+                self.assertNotEqual(out, sample)
+                self.assertRegex(out, r"[぀-ヿ一-鿿]")
+                self.assertEqual(tr("en", sample), sample)
+                self.assertEqual(tr(None, sample), sample)
+        self.assertEqual(tr("ja", "Something unknown: x"), "Something unknown: x")
+
+    def test_parameters_survive(self):
+        self.assertEqual(tr("ja", "Invalid language: xx"), "言語の指定が正しくありません：xx")
+        self.assertEqual(tr("ja", "Backups to keep must be between 0 and 200"),
+                         "残すバックアップの数は 0 から 200 までにしてください．")
+        self.assertEqual(tr("ja", "The popup width must be 0 or between 200 and 4000"),
+                         "ポップアップの幅は 0（自動）か，200 から 4000 までにしてください．")
+        self.assertEqual(tr("ja", "Service 2 (My LLM): Enter a name"), "サービス 2（My LLM）：名前を入力してください．")
+        self.assertEqual(tr("ja", "Invalid endpoint: boom"), "エンドポイントが正しくありません：boom")
+        self.assertEqual(tr("ja", "Invalid display language: fr"), "表示言語の指定が正しくありません：fr")
+
 
 class SettingsTest(unittest.TestCase):
     def test_defaults_and_broken_file(self):
@@ -328,6 +415,27 @@ class SettingsTest(unittest.TestCase):
         self.assertEqual(settings.validate({"lastColor": "#FF6666"})["lastColor"], "#ff6666")
         with self.assertRaises(settings.SettingsError):
             settings.validate({"lastColor": "red"})
+
+    def test_new_options(self):
+        d = settings.defaults()
+        self.assertEqual(d["uiLang"], "en")
+        self.assertEqual(d["backupCount"], 5)
+        self.assertEqual((d["skipFurniture"], d["skipCaptions"], d["skipSmallText"]), (True, True, True))
+        self.assertEqual((d["furnitureBand"], d["sizeTolerance"]), (12, 6))
+        self.assertEqual((d["popupWidth"], d["popupHeight"]), (0, 0))
+        v = settings.validate({"uiLang": "ja", "furnitureBand": "15", "sizeTolerance": 10.4, "backupCount": 0,
+                               "skipCaptions": "false", "popupWidth": 480, "popupHeight": 0})
+        self.assertEqual(v["uiLang"], "ja")
+        self.assertEqual((v["furnitureBand"], v["sizeTolerance"], v["backupCount"]), (15, 10, 0))
+        self.assertFalse(v["skipCaptions"])
+        self.assertEqual((v["popupWidth"], v["popupHeight"]), (480, 0))
+        for bad in ({"uiLang": "fr"}, {"furnitureBand": 2}, {"furnitureBand": 26}, {"sizeTolerance": "x"},
+                    {"backupCount": -1}, {"backupCount": 201}, {"popupWidth": 100}, {"popupHeight": 5000},
+                    {"backupCount": True}):
+            with self.assertRaises(settings.SettingsError, msg=bad):
+                settings.validate(bad)
+        # ファイルを読むときは，正しくない値を既定値に戻す
+        self.assertEqual(settings.validate({"uiLang": "fr", "backupCount": 999}, strict=False)["backupCount"], 5)
 
     def test_endpoint_urls(self):
         self.assertEqual(settings.chat_url("http://localhost:1234"), "http://localhost:1234/v1/chat/completions")

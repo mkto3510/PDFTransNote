@@ -1,8 +1,10 @@
 // PDF TransNote：サーバー（transnote/server.py）とデスクトップ（pywebview）とのやりとり（pdf.js には触れない）
 
+import { lang } from "./i18n.mjs";
+
 const TOKEN = document.querySelector('meta[name="transnote-token"]')?.content ?? "";
-/** サーバーへの書き込み・中継に付けるヘッダー（起動ごとの秘密の値）． */
-export const AUTH = { "X-TransNote-Token": TOKEN };
+/** サーバーへの要求に付けるヘッダー（起動ごとの秘密の値と，画面の言語．サーバーは誤りの文をこの言語で返す）． */
+export const AUTH = { "X-TransNote-Token": TOKEN, "X-TransNote-Lang": lang };
 
 async function json(res) {
   const data = await res.json().catch(() => ({}));
