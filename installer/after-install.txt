@@ -1,0 +1,32 @@
+﻿PDF TransNote has been installed.
+
+[Portable app]
+- Settings and backups are stored in the "data" folder inside the install folder.
+- There is no uninstaller. To remove the app, delete the install folder.
+
+[Open PDFs from Zotero]
+In Zotero, go to Edit -> Settings -> General -> Reader -> "Open PDFs using",
+and choose PdfTransNote.exe in the install folder.
+
+[Translation server]
+By default the app uses LM Studio (http://localhost:1234) with the model plamo-3-translate-0.8b.
+Start the LM Studio server and load the model.
+You can register any number of translation services (endpoint, API key, model, prompts, etc.)
+in the app's settings (gear icon).
+
+[How to use]
+Select English text in a PDF and a popup appears.
+- Color dot / Annotate & Translate (Alt+Shift+T)
+  Creates a highlight in that color, translates the text automatically, puts the translation
+  in the highlight's comment, and saves the PDF. The popup closes, so you can select the next text right away.
+- Source box
+  Lets you edit the original text before translating.
+- Translate (Alt+T)
+  Translates inside the popup. Add Annotation saves it as a highlight with a comment.
+Click a highlight to change its color, Translate, Translate to Comment, or Delete.
+The Annotations view in the left sidebar lists all highlights with their translations and progress.
+The original PDF is copied to data\backups before the first save.
+
+[License]
+PDF TransNote is free software under the GNU General Public License v3.0 or later (LICENSE.txt).
+Licenses of bundled software are in the LICENSES folder.
