@@ -14,6 +14,7 @@ import { Popup } from "./popup.js";
 import { t } from "./i18n.mjs";
 import { SettingsDialog } from "./settings-dialog.js";
 import { AnnotationSidebar } from "./sidebar.js";
+import { AboutDialog } from "./about-dialog.js";
 
 const FALLBACK = {
   services: [],
@@ -115,15 +116,16 @@ async function saveToFile({ force = false, manual = false } = {}) {
   }
   bridge.setBusy(true);
   try {
-    const data = await bridge.saveData();
-    const { status, ok, info } = await api.putPdf(bridge.docUrl(), data, force);
+    const url = bridge.docUrl();
+    const saved = await bridge.saveData();
+    const { status, ok, info } = await api.putPdf(url, saved.data, force);
     if (status === 409 && !force) {
       if (confirm(t("save.conflict"))) return await saveToFile({ force: true, manual });
       toast(t("save.canceled"), "error");
       return;
     }
     if (!ok) throw new Error(info.error || `${status}`);
-    bridge.markSaved();
+    bridge.markSaved(saved);
     toast(info.backup ? t("save.doneBackup") : t("save.done"), "ok");
   } catch (e) {
     toast(t("save.failed", { message: e.message }), "error");
@@ -134,13 +136,23 @@ async function saveToFile({ force = false, manual = false } = {}) {
   }
 }
 
-const saver = new SaveScheduler(() => saveToFile());
+let writes = Promise.resolve();
+function serializeWrite(action) {
+  const result = writes.then(action);
+  writes = result.catch(() => {});
+  return result;
+}
+const saver = new SaveScheduler(() => serializeWrite(() => saveToFile()));
 
 /**
  * 名前を付けて保存：デスクトップではファイルのダイアログで選んだ場所に書く（開いている PDF はそのまま）．
  * ブラウザーでは pdf.js の元の保存（ダウンロード）．
  */
-async function saveAs() {
+function saveAs() {
+  return serializeWrite(saveCopy);
+}
+
+async function saveCopy() {
   if (!bridge.hasDocument()) return;
   if (!api.inDesktop) return bridge.downloadCopy();
   const docToken = decodeURIComponent(bridge.docUrl()).split("/")[2] ?? "";
@@ -148,10 +160,10 @@ async function saveAs() {
   if (!target) return;
   bridge.setBusy(true);
   try {
-    const data = await bridge.saveData();
-    const { status, ok, info } = await api.putSaveAs(target, data);
+    const saved = await bridge.saveData();
+    const { status, ok, info } = await api.putSaveAs(target, saved.data);
     if (!ok) throw new Error(info.error || `${status}`);
-    if (info.original) bridge.markSaved(); // 開いている PDF そのものを選んだ
+    if (info.original) bridge.markSaved(saved); // 開いている PDF そのものを選んだ
     toast(t("save.asDone", { name: info.name }), "ok");
   } catch (e) {
     toast(t("save.failed", { message: e.message }), "error");
@@ -221,8 +233,13 @@ async function changeColor(target, color) {
 }
 
 async function deleteHighlight(target) {
-  for (const j of queue.jobs) if (!j.finished && bridge.sameGroup(j.meta.target, target)) j.cancel();
-  if (await bridge.remove(target)) requestSave();
+  const associated = queue.jobs.filter((j) => bridge.sameGroup(j.meta.target, target));
+  if (!(await bridge.remove(target))) return false;
+  for (const job of associated) queue.remove(job);
+  sidebar?.removeDeleted();
+  requestSave();
+  reportDirty(true);
+  return true;
 }
 
 /** サイドバーでコメントを直した：そのハイライトへ移動してから書く（描かれていないページでは書けないため）． */
@@ -329,12 +346,14 @@ function bindPopupEvents() {
       if (!anchor) return;
       e.preventDefault();
       e.stopPropagation();
-      if (e.shiftKey) {
-        annotateAndTranslate(anchor, ctx.settings().lastColor, anchor.text);
-      } else {
-        openPopup({ anchor });
-        popup.onTranslate();
-      }
+      openPopup({ anchor });
+      const current = popup;
+      const auto = e.shiftKey;
+      current.sourceReady.then((ready) => {
+        if (!ready || popup !== current) return;
+        if (auto) current.onAuto(ctx.settings().lastColor);
+        else current.onTranslate();
+      });
     },
     true,
   );
@@ -365,6 +384,8 @@ bridge.on("ready", async () => {
   sidebar = new AnnotationSidebar(ctx);
   settingsDialog = new SettingsDialog({ toast, applySettings, canReload });
   bridge.addToolbarButton({ id: "transnoteGear", title: t("app.settingsTitle"), onClick: () => settingsDialog.open() });
+  const about = new AboutDialog();
+  bridge.addMenuButton({ id: "tnAboutButton", label: t("about.title"), dialogId: "tnAbout", onClick: () => about.open() });
   bridge.installSaveButtons({ saveTitle: t("app.saveTitle"), saveAsTitle: t("app.saveAsTitle") });
   bridge.setSaveAsHandler(saveAs);
   bridge.setSidebarOptionLabel(t("sidebar.optionLabel"));

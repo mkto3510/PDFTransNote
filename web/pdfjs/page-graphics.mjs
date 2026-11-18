@@ -22,21 +22,56 @@ const MIN_DRAWING_AREA = 0.01;
  * @param {{left: number, top: number, right: number, bottom: number, t: string}[]} rs
  */
 function clusterDrawings(rs) {
-  const parent = rs.map((_, i) => i);
-  const find = (i) => (parent[i] === i ? i : (parent[i] = find(parent[i])));
-  const order = rs.map((_, i) => i).sort((a, b) => rs[a].left - rs[b].left);
-  // 左端の順に並べ，左右に近いものだけを比べる
-  for (let x = 0; x < order.length; x++) {
-    const a = rs[order[x]];
-    for (let y = x + 1; y < order.length; y++) {
-      const b = rs[order[y]];
-      if (b.left > a.right + DRAWING_JOIN) break;
-      if (b.top > a.bottom + DRAWING_JOIN || a.top > b.bottom + DRAWING_JOIN) continue;
-      parent[find(order[x])] = find(order[y]);
+  const unique = new Map();
+  for (const r of rs) {
+    const key = `${r.left},${r.top},${r.right},${r.bottom}`;
+    let entry = unique.get(key);
+    if (!entry) unique.set(key, (entry = { ...r, n: 0, rules: 0, boxes: 0 }));
+    entry.n++;
+    if (r.t === "rule") entry.rules++;
+    if (r.t === "box") entry.boxes++;
+  }
+  const rects = [...unique.values()];
+  const parent = rects.map((_, i) => i);
+  const size = new Uint32Array(rects.length).fill(1);
+  const find = (i) => {
+    while (parent[i] !== i) {
+      parent[i] = parent[parent[i]];
+      i = parent[i];
     }
+    return i;
+  };
+  const join = (i, j) => {
+    let a = find(i);
+    let b = find(j);
+    if (a === b) return;
+    if (size[a] < size[b]) [a, b] = [b, a];
+    parent[b] = a;
+    size[a] += size[b];
+  };
+  const band = (y) => Math.max(0, Math.min(63, Math.floor(y * 64)));
+  const rows = Array.from({ length: 64 }, () => []);
+  const order = rects.map((_, i) => i).sort((a, b) => rects[b].left - rects[a].left);
+  const visited = new Int32Array(rects.length).fill(-1);
+  for (const i of order) {
+    const a = rects[i];
+    const first = band(a.top - DRAWING_JOIN);
+    const last = band(a.bottom + DRAWING_JOIN);
+    for (let y = first; y <= last; y++) {
+      const row = rows[y];
+      for (let k = row.length - 1; k >= 0; k--) {
+        const j = row[k];
+        const b = rects[j];
+        if (b.left > a.right + DRAWING_JOIN) break;
+        if (visited[j] === i) continue;
+        visited[j] = i;
+        if (b.top <= a.bottom + DRAWING_JOIN && a.top <= b.bottom + DRAWING_JOIN) join(i, j);
+      }
+    }
+    for (let y = band(a.top); y <= band(a.bottom); y++) rows[y].push(i);
   }
   const groups = new Map();
-  rs.forEach((r, i) => {
+  rects.forEach((r, i) => {
     const k = find(i);
     let g = groups.get(k);
     if (!g) groups.set(k, (g = { left: r.left, top: r.top, right: r.right, bottom: r.bottom, n: 0, rules: 0, boxes: 0 }));
@@ -44,9 +79,9 @@ function clusterDrawings(rs) {
     g.top = Math.min(g.top, r.top);
     g.right = Math.max(g.right, r.right);
     g.bottom = Math.max(g.bottom, r.bottom);
-    g.n++;
-    if (r.t === "rule") g.rules++;
-    else if (r.t === "box") g.boxes++;
+    g.n += r.n;
+    g.rules += r.rules;
+    g.boxes += r.boxes;
   });
   return [...groups.values()];
 }
@@ -77,6 +112,15 @@ function isWhite(color) {
  * @typedef {{left: number, top: number, right: number, bottom: number}} Rect
  */
 export function graphicsFromOperatorList(opList, viewport, OPS) {
+  return groupPageDrawings(collectPageGeometry(opList, viewport, OPS));
+}
+
+export function groupPageDrawings({ figures, boxes, rules, paths }) {
+  const drawings = clusterDrawings(paths).filter((g) => g.n >= MIN_DRAWING_PATHS && (g.right - g.left) * (g.bottom - g.top) >= MIN_DRAWING_AREA);
+  return { figures, boxes, rules, drawings };
+}
+
+export function collectPageGeometry(opList, viewport, OPS) {
   const O = OPS;
   const IMAGE_OPS = new Set(
     [O.paintImageXObject, O.paintInlineImageXObject, O.paintImageMaskXObject, O.paintImageXObjectRepeat].filter((v) => v !== undefined),
@@ -150,6 +194,5 @@ export function graphicsFromOperatorList(opList, viewport, OPS) {
       if (w * h < 0.6) paths.push({ ...r, t });
     }
   }
-  const drawings = clusterDrawings(paths).filter((g) => g.n >= MIN_DRAWING_PATHS && (g.right - g.left) * (g.bottom - g.top) >= MIN_DRAWING_AREA);
-  return { figures, boxes, rules, drawings };
+  return { figures, boxes, rules, paths };
 }

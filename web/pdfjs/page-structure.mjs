@@ -132,39 +132,33 @@ const prepCache = new WeakMap();
  * @param {object} page
  * @param {{side: string, edge: number}[] | null} [knownColumns] ほかのページで見つかった行番号の列（候補の少ないページで使う）
  */
-function preparePage(page, knownColumns = null) {
-  const key = knownColumns?.length ? knownColumns.map((k) => k.side + k.edge.toFixed(4)).join(",") : "";
-  let c = prepCache.get(page);
-  const v = page.view;
-  if (
-    !(
-      c &&
-      c.items === page.items &&
-      c.styles === page.styles &&
-      c.rotate === page.rotate &&
-      c.view === v &&
-      (!v || c.v0 === v[0] + "," + v[1] + "," + v[2] + "," + v[3])
-    )
-  ) {
-    c = {
-      byKey: new Map(),
-      items: page.items,
-      styles: page.styles,
-      rotate: page.rotate,
-      view: v,
-      v0: v ? v[0] + "," + v[1] + "," + v[2] + "," + v[3] : "",
+export function preparePage(page, knownColumns = null) {
+  let cache = prepCache.get(page);
+  const viewKey = page.view?.join(",");
+  if (!cache || (page.normalized && cache.normalized !== page.normalized) ||
+      cache.items !== page.items || cache.styles !== page.styles ||
+      cache.rotate !== page.rotate || cache.viewKey !== viewKey) {
+    const normalized = page.normalized ?? normalizePageText(page);
+    cache = {
+      items: page.items, styles: page.styles, rotate: page.rotate, viewKey, normalized,
+      base: buildPrep(normalized),
     };
-    prepCache.set(page, c);
+    prepCache.set(page, cache);
   }
-  let prep = c.byKey.get(key);
-  if (!prep) {
-    prep = buildPrep(page, knownColumns);
-    c.byKey.set(key, prep);
+  if (!knownColumns?.length || !cache.normalized.hasNumbers) return cache.base;
+  const key = JSON.stringify(knownColumns);
+  if (cache.knownKey !== key) {
+    const detected = findLineNumbers(cache.normalized.items, cache.normalized.dispW, knownColumns);
+    const same = detected.indices.size === cache.base.numberIndices.size &&
+      [...detected.indices].every((i) => cache.base.numberIndices.has(i));
+    cache.known = same ? cache.base : buildPrep(cache.normalized, detected);
+    cache.knownKey = key;
   }
-  return prep;
+  return cache.known;
 }
 
-function buildPrep(page, knownColumns = null) {
+/** Worker では PDF.js の文字項目を持ち続けず，解析に使う座標と属性だけを保持する． */
+export function normalizePageText(page) {
   const view = Array.isArray(page.view) && page.view.length >= 4 ? page.view : [0, 0, 612, 792];
   const vx = Math.min(view[0], view[2]);
   const vy = Math.min(view[1], view[3]);
@@ -261,7 +255,11 @@ function buildPrep(page, knownColumns = null) {
     });
   }
   fixMergedSubscripts(items);
-  const lineNumbers = findLineNumbers(items, dispW, knownColumns);
+  return { items, dispW, dispH, hasNumbers: items.some((it) => LINE_NUMBER_RE.test(it.str)) };
+}
+
+function buildPrep({ items, dispW, dispH }, detected = findLineNumbers(items, dispW)) {
+  const { columns: lineNumbers, indices: numberIndices } = detected;
 
   // --- 行：描く順に続く item をまとめる ---
   const lines = [];
@@ -312,9 +310,8 @@ function buildPrep(page, knownColumns = null) {
       pending.push(k);
       continue;
     }
-    if (it.lineNo) continue; // 行番号は本文の行に入れない（後で，1 個ずつの行にして末尾に足す）
+    if (numberIndices.has(k)) continue; // 行番号は本文の行に入れない（後で，1 個ずつの行にして末尾に足す）
     if (cur && rubyOf(cur, it)) {
-      it.ruby = true;
       cur.items.push(...pending, k);
       cur.ruby.push(k);
     } else if (cur && sameLine(cur, it)) {
@@ -349,7 +346,7 @@ function buildPrep(page, knownColumns = null) {
   // 行番号：本文の行の並びを切らないように，末尾に 1 個ずつの行として足す
   for (let k = 0; k < items.length; k++) {
     const it = items[k];
-    if (!it.lineNo) continue;
+    if (!numberIndices.has(k)) continue;
     lines.push({
       items: [k],
       nb: [k],
@@ -387,7 +384,7 @@ function buildPrep(page, knownColumns = null) {
       chars += it.chars;
       if (it.mono) monoChars += it.chars;
       if (!it.artifact) artifact = false;
-      if (it.lineNo) continue;
+      if (numberIndices.has(k)) continue;
       totChars += it.chars;
       if (it.rotated) rotChars += it.chars;
       if (it.fh > 0) {
@@ -423,13 +420,14 @@ function buildPrep(page, knownColumns = null) {
   }
   // 同じ高さに並ぶ行の切れ端の数（表の行は 3 つ以上の欄に分かれる）
   for (const l of lines) l.row = 1;
-  for (let i = 0; i < lines.length; i++) {
-    const a = lines[i];
-    if (a.rotated || a.lineNo) continue;
-    for (let j = i + 1; j < lines.length; j++) {
-      const b = lines[j];
-      if (b.rotated || b.lineNo) continue;
-      if (Math.abs(a.base - b.base) <= 0.3 * Math.min(a.size || 1, b.size || 1)) {
+  const upright = lines.filter((line) => !line.rotated && !line.lineNo).sort((a, b) => a.base - b.base);
+  for (let i = 0; i < upright.length; i++) {
+    const a = upright[i];
+    for (let j = i + 1; j < upright.length; j++) {
+      const b = upright[j];
+      const distance = b.base - a.base;
+      if (distance > 0.3 * (a.size || 1)) break;
+      if (distance <= 0.3 * (b.size || 1)) {
         a.row++;
         b.row++;
       }
@@ -439,7 +437,7 @@ function buildPrep(page, knownColumns = null) {
   const fontChars = new Map();
   for (const l of lines) if (!l.rotated && !l.lineNo && l.chars >= 30) fontChars.set(l.font, (fontChars.get(l.font) || 0) + l.chars);
   const bodyFont = fontChars.size ? modeOf(fontChars) : null;
-  return { items, lines, lineOf, outLines, dispW, dispH, rotChars, totChars, sizesUpright, sizesAll, lineNumbers, bodyFont };
+  return { items, lines, lineOf, outLines, dispW, dispH, rotChars, totChars, sizesUpright, sizesAll, lineNumbers, numberIndices, bodyFont };
 }
 
 /**
@@ -509,7 +507,11 @@ const LINE_NUMBER_EDGE_TOL = 0.004;
  * 表の欄の数（本文の枠の中にある），番号付きの箇条書き（「1.」）は取らない．
  * @returns {{side: string, edge: number}[]} 見つけた列（edge はページの幅に対する割合）
  */
+const LINE_NUMBER_RE = /^\s*\d{1,4}\s*$/;
+
 function findLineNumbers(items, dispW, knownColumns) {
+  const indices = new Set();
+  const columns = [];
   const cands = [];
   const lefts = [];
   const rights = [];
@@ -518,20 +520,20 @@ function findLineNumbers(items, dispW, knownColumns) {
   for (let k = 0; k < items.length; k++) {
     const it = items[k];
     if (it.blank || it.rotated || it.vertical) continue;
-    if (/^\s*\d{1,4}\s*$/.test(it.str)) cands.push({ k, v: Number(it.str.trim()), it });
+    const numeric = LINE_NUMBER_RE.test(it.str);
+    if (numeric) cands.push({ k, v: Number(it.str.trim()), it });
     else if (it.chars >= 2) others.push(it);
-    if (!/^\s*\d{1,4}\s*$/.test(it.str) && it.chars >= 15) {
+    if (!numeric && it.chars >= 15) {
       longs.push(it);
       lefts.push(it.left);
       rights.push(it.right);
     }
   }
-  if (!cands.length || !lefts.length) return [];
+  if (!cands.length || !lefts.length) return { columns, indices };
   lefts.sort((a, b) => a - b);
   rights.sort((a, b) => a - b);
   const refLeft = lefts[Math.floor(lefts.length * 0.1)];
   const refRight = rights[Math.ceil(rights.length * 0.9) - 1];
-  const found = [];
   // 二段組の段の間の空き：長い文字の item がほとんどかからない位置（表題など，段をまたぐ行は少しならよい）
   const inGutter = (c) => {
     if (c.it.left <= refLeft + 2 * c.it.fh || c.it.right >= refRight - 2 * c.it.fh) return false;
@@ -592,11 +594,11 @@ function findLineNumbers(items, dispW, knownColumns) {
         // 行の送りが一定（番号の差に比例する）
         if (!known && units.filter((u) => Math.abs(u - unit) <= 0.25 * unit).length < 0.8 * units.length) continue;
       }
-      for (const c of g) c.it.lineNo = true;
-      found.push({ side, edge });
+      for (const c of g) indices.add(c.k);
+      columns.push({ side, edge });
     }
   }
-  return found;
+  return { columns, indices };
 }
 
 /** 行の文字．間が空いた item の間には空白を入れる． */
@@ -1161,11 +1163,16 @@ function folioNumbers(text) {
  *   3. DOI の行．
  * @returns {Set<number>[]} ページごとの，柱の行の番号
  */
+const furnitureCache = new WeakMap();
+
 function findFurniture(work, band) {
   const N = work.length;
   const cands = work.map((w) => {
     if (!w) return [];
-    const { lines, dispH } = w.prep;
+    const prep = w.prep;
+    const cached = furnitureCache.get(prep);
+    if (cached?.band === band) return cached.candidates;
+    const { lines, dispH } = prep;
     const out = [];
     // 帯の中で，いちばん外側（上の帯ならいちばん上，下の帯ならいちばん下）の行の位置
     let minTop = Infinity;
@@ -1186,6 +1193,7 @@ function findFurniture(work, band) {
       const outer = side === "top" ? l.top - minTop < 0.6 * l.size : maxBottom - l.bottom < 0.6 * l.size;
       out.push({ li, side, outer, pos: l.top / dispH, text, plain, letters: plain.replace(/[#\p{P}\p{S}]/gu, ""), grams: null, nums: folioNumbers(l.text), raw: l.text });
     });
+    furnitureCache.set(prep, { band, candidates: out });
     return out;
   });
   const marks = work.map(() => new Set());
@@ -1362,6 +1370,14 @@ function xyOrder(rects, em) {
  *   hyphenWords は，行の途中にハイフンでつないで書かれた語（小文字）．行末のハイフンを残すかを決めるのに使う．
  */
 export function analyzeDocument(pages, options = {}) {
+  const analysis = prepareDocumentAnalysis(pages, options);
+  return { bodySize: analysis.bodySize, hyphenWords: analysis.hyphenWords, pages: Array.from(Array.isArray(pages) ? pages : [], (_, i) => analysis.page(i)) };
+}
+
+const pageResults = new WeakMap();
+const pageWords = new WeakMap();
+
+export function prepareDocumentAnalysis(pages, options = {}) {
   const list = Array.isArray(pages) ? pages : [];
   const bandPct = Number.isFinite(options?.furnitureBand) ? options.furnitureBand : DEFAULT_OPTIONS.furnitureBand;
   const tolPct = Number.isFinite(options?.sizeTolerance) ? options.sizeTolerance : DEFAULT_OPTIONS.sizeTolerance;
@@ -1370,60 +1386,58 @@ export function analyzeDocument(pages, options = {}) {
   let preps = list.map((p) => (p ? preparePage(p) : null));
   // 行番号の列：2 ページ以上で同じ位置に見つかった列は，番号の少ないページ（図のページなど）でも行番号とする
   const cols = [];
-  for (const prep of preps) {
+  for (const [pageIndex, prep] of preps.entries()) {
     for (const c of prep?.lineNumbers ?? []) {
       const g = cols.find((x) => x.side === c.side && Math.abs(x.edge - c.edge) <= LINE_NUMBER_EDGE_TOL);
-      if (g) g.pages++;
-      else cols.push({ side: c.side, edge: c.edge, pages: 1 });
+      if (g) g.pages.add(pageIndex);
+      else cols.push({ side: c.side, edge: c.edge, pages: new Set([pageIndex]) });
     }
   }
-  const known = cols.filter((c) => c.pages >= 2).sort((a, b) => (a.side < b.side ? -1 : a.side > b.side ? 1 : a.edge - b.edge));
+  const known = cols.filter((c) => c.pages.size >= 2).map(({ side, edge }) => ({ side, edge }));
   if (known.length) preps = list.map((p) => (p ? preparePage(p, known) : null));
   const bodySize = computeBodySize(preps);
   const body = bodySize || 10;
 
-  // 1. ページごとに段落を作る
-  const work = preps.map((prep, p) => {
-    if (!prep) return null;
-    const pitch = pagePitch(prep, body, tol) || 1.2 * body;
-    let blocks = buildBlocks(prep, body, tol, band, pitch);
-    // アルゴリズム・コードの箱の行は，前後の本文と別の段落にする
-    const codeLines = findCodeLines(prep, blocks, list[p]);
-    const { dispH } = prep;
-    const bandOf = (box) => (box.bottom <= band * dispH ? "top" : box.top >= (1 - band) * dispH ? "bottom" : "");
-    if (codeLines.size) blocks = splitFurniture(blocks, prep.lines, codeLines, bandOf);
-    // 別行立ての式の行も，前後の本文と別の段落にする
-    const eqLines = findEquationLines(prep, body, tol, pitch, codeLines);
-    if (eqLines.size) blocks = splitFurniture(blocks, prep.lines, eqLines, bandOf);
-    return { prep, pitch, blocks, codeLines, eqLines };
-  });
-
-  // 2. 柱とページ番号の行，本文の枠，行の途中のハイフンの語
+  const work = preps.map((prep) => prep ? { prep } : null);
   const furnitureLines = findFurniture(work, band);
-  work.forEach((w, p) => {
-    if (!w) return;
-    const { dispH } = w.prep;
-    const bandOf = (box) => (box.bottom <= band * dispH ? "top" : box.top >= (1 - band) * dispH ? "bottom" : "");
-    w.blocks = splitFurniture(w.blocks, w.prep.lines, furnitureLines[p], bandOf);
-  });
   const frames = bodyFrames(work, body, tol);
   const hyphenWords = new Set();
-  for (const w of work) {
-    if (!w) continue;
-    for (const l of w.prep.lines) {
-      for (const m of l.text.matchAll(/(\p{L}+)[-‐](\p{L}+)(?=.)/gu)) {
-        if (m.index + m[0].length < l.text.length) hyphenWords.add(m[0].toLowerCase().replace("‐", "-"));
+  for (const prep of preps) {
+    if (!prep) continue;
+    let words = pageWords.get(prep);
+    if (!words) {
+      words = new Set();
+      for (const l of prep.lines) {
+        for (const m of l.text.matchAll(/(\p{L}+)[-‐](\p{L}+)(?=.)/gu)) {
+          if (m.index + m[0].length < l.text.length) words.add(m[0].toLowerCase().replace("‐", "-"));
+        }
       }
+      pageWords.set(prep, words);
     }
+    for (const word of words) hyphenWords.add(word);
   }
 
-  // 3. 段落ごとに分ける
-  const outPages = work.map((w, pageIndex) => {
-    if (!w) return null;
-    const { prep, pitch, blocks } = w;
+  function page(pageIndex) {
+    const prep = preps[pageIndex];
+    if (!prep) return null;
+    const pg = list[pageIndex];
+    const frame = frames[pageIndex % 2];
+    const furniture = furnitureLines[pageIndex];
+    const key = JSON.stringify([bodySize, band, tol, frame, [...furniture]]);
+    const old = pageResults.get(pg);
+    if (old?.prep === prep && old.key === key &&
+        old.graphics.every((value, i) => value === pg[GRAPHICS[i]])) return old.result;
+
+    const pitch = pagePitch(prep, body, tol) || 1.2 * body;
+    let blocks = buildBlocks(prep, body, tol, band, pitch);
+    const codeLines = findCodeLines(prep, blocks, pg);
+    const bandOf = (box) => (box.bottom <= band * prep.dispH ? "top" : box.top >= (1 - band) * prep.dispH ? "bottom" : "");
+    if (codeLines.size) blocks = splitFurniture(blocks, prep.lines, codeLines, bandOf);
+    const eqLines = findEquationLines(prep, body, tol, pitch, codeLines);
+    if (eqLines.size) blocks = splitFurniture(blocks, prep.lines, eqLines, bandOf);
+    blocks = splitFurniture(blocks, prep.lines, furniture, bandOf);
     const { items, lines, lineOf, dispW, dispH } = prep;
     const figures = (list[pageIndex]?.figures ?? []).filter((f) => f && (f.right - f.left) * (f.bottom - f.top) < 0.8);
-    const frame = frames[pageIndex % 2];
     const bodyRotated = prep.rotChars > 0.5 * prep.totChars; // 縦書きのように，本文そのものが回転している
     // 本文の行の幅の目安（いちばん広い行の代わりに，80 パーセンタイル．ページ全体に渡る 1 行に引きずられないように）
     const widths = lines
@@ -1499,7 +1513,6 @@ export function analyzeDocument(pages, options = {}) {
       }
       return tot ? hit / tot : 0;
     };
-    const pg = list[pageIndex] ?? {};
     /** 段落の文字の中心が，矩形の並び（表示の座標，0〜1）のどれかに入る割合． */
     const shareIn = (b, rects) => {
       if (!rects.length) return 0;
@@ -1616,10 +1629,10 @@ export function analyzeDocument(pages, options = {}) {
       ) {
         cls = "auxiliary";
         kind = "caption";
-      } else if (b.lines.every((li) => w.codeLines.has(li))) {
+      } else if (b.lines.every((li) => codeLines.has(li))) {
         cls = "auxiliary";
         kind = "code";
-      } else if (b.lines.every((li) => w.eqLines.has(li))) {
+      } else if (b.lines.every((li) => eqLines.has(li))) {
         cls = "auxiliary";
         kind = "equation";
       } else if (b.rotated && !bodyRotated) {
@@ -1756,7 +1769,7 @@ export function analyzeDocument(pages, options = {}) {
       }
     }
 
-    return {
+    const result = {
       classes,
       kinds,
       order,
@@ -1765,9 +1778,14 @@ export function analyzeDocument(pages, options = {}) {
       lineOf,
       blocks: blocks.map((b) => ({ lines: b.lines, class: b.cls, kind: b.kind, size: b.size, rank: b.rank })),
     };
-  });
-  return { bodySize, hyphenWords, pages: outPages };
+    pageResults.set(pg, { prep, key, graphics: GRAPHICS.map((name) => pg[name]), result });
+    return result;
+  }
+
+  return { bodySize, hyphenWords, page };
 }
+
+const GRAPHICS = ["figures", "boxes", "rules", "drawings"];
 
 /**
  * 小さい文字の段落が，数式の切れ端（∑ の上下の添え字など）か：短く，直前の本文の段落のすぐそばにある．
@@ -1882,8 +1900,8 @@ export function filterSelection(pieces, analysis, options = {}) {
       const above = (i) => {
         const b = box(i);
         if (!b || b.top >= sBox.top) return false;
-        if (b.bottom <= sBox.top && b.left < sBox.right && b.right > sBox.left) return true;
-        return rank[i] !== null && rank[s] !== null && rank[i] < rank[s];
+        if (rank[i] !== null && rank[s] !== null && rank[i] !== rank[s]) return rank[i] < rank[s];
+        return cat[i] !== "body" && b.bottom <= sBox.top && b.left < sBox.right && b.right > sBox.left;
       };
       while (j > s && (blank[j] || (list[j].pageIndex === list[s].pageIndex && above(j)))) j--;
       if (j < e && cat[j] === "body") {

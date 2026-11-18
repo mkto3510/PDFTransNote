@@ -606,3 +606,21 @@
     grid-template-columns: 1fr;
   }
 }
+#tnAbout {
+  box-sizing: border-box;
+  width: min(34rem, calc(100% - 2rem));
+  max-height: 85vh;
+  padding: 1.25rem;
+  border: 1px solid var(--tn-border);
+  border-radius: 0.65rem;
+  background: var(--tn-bg);
+  color: var(--tn-fg);
+  font: menu;
+
+  & h2 { margin: 0 0 0.75rem; }
+  & summary { cursor: pointer; padding: 0.25rem 0; }
+  & details > div { margin-inline-start: 0.75rem; }
+  & pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+  & a { color: var(--tn-accent); }
+  & form { margin-top: 1rem; text-align: end; }
+}

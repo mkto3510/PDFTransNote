@@ -30,6 +30,19 @@ export class AnnotationSidebar {
     this.dockEl = null; // その入れ物（一覧を描き直しても同じものを付け直す）
     if (!this.root) return;
     this.root.classList.add("tnSidebar");
+    this.visibleQuotes = new IntersectionObserver((entries) => {
+      for (const { target, isIntersecting } of entries) {
+        if (!isIntersecting) continue;
+        this.visibleQuotes.unobserve(target);
+        const entry = this.cards.get(target.closest(".tnCard")?.dataset.key)?.entry;
+        if (!entry) continue;
+        ctx.bridge.sourceTextAsync(entry.target).then((text) => {
+          if (!target.isConnected || !text) return;
+          entry.text = text;
+          target.textContent = cleanSource(text);
+        }).catch((error) => console.warn("[transnote] annotation preview", error));
+      }
+    });
     ctx.bridge.on("highlightsChanged", () => this.invalidate());
     ctx.bridge.on("sidebarView", (visible) => visible && this.stale && this.refresh());
     // パネルの中のキー操作（コメントの入力など）を，pdf.js のショートカットに渡さない
@@ -42,6 +55,16 @@ export class AnnotationSidebar {
   invalidate() {
     this.stale = true;
     if (this.ctx.bridge.isSidebarVisible()) this.refresh();
+  }
+
+  removeDeleted() {
+    for (const [key, { entry, card }] of this.cards) {
+      if (this.ctx.bridge.isAlive(entry.target)) continue;
+      card.remove();
+      this.cards.delete(key);
+      this.expanded.delete(key);
+    }
+    this.entries = this.entries.filter((entry) => this.ctx.bridge.isAlive(entry.target));
   }
 
   async refresh() {
@@ -138,6 +161,7 @@ export class AnnotationSidebar {
     const focus = this.dockEl?.contains(document.activeElement) ? document.activeElement : null;
     const n = this.entries.length;
     bridge.setSidebarTitle(n ? t("sidebar.titleCount", { n }) : t("sidebar.title"));
+    this.visibleQuotes.disconnect();
     this.cards.clear();
     if (!n) {
       this.root.replaceChildren(el("p", { class: "tnSideEmpty", text: t("sidebar.empty") }));
@@ -179,6 +203,7 @@ export class AnnotationSidebar {
       },
     });
     quote.style.setProperty("--sw", entry.color || "#ffd400");
+    if (!entry.text) this.visibleQuotes.observe(quote);
     const comment = el("div", {
       class: "tnCardComment",
       tabindex: "0",
@@ -243,10 +268,13 @@ export class AnnotationSidebar {
   /** そのハイライトのカードを選んだ状態にし，見える位置まで動かす（null なら選びを外す）． */
   select(target) {
     const key = target ? this.ctx.bridge.keyOf(target) : null;
+    if (key === this.selectedKey) return;
+    this.cards.get(this.selectedKey)?.card.classList.remove("selected");
     this.selectedKey = key;
     this.ctx.bridge.markSelected(target ?? null); // ページの上のハイライトにも点線の枠を付ける
-    for (const [k, c] of this.cards) c.card.classList.toggle("selected", k === key);
-    if (key) this.cards.get(key)?.card.scrollIntoView({ block: "nearest" });
+    const card = this.cards.get(key)?.card;
+    card?.classList.add("selected");
+    card?.scrollIntoView({ block: "nearest" });
   }
 
   /** コメントをその場で直す（Ctrl+Enter か外を押すと保存，Esc で取り消し）． */

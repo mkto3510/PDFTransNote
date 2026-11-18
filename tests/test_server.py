@@ -13,7 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
 
-from transnote import paths, settings
+from transnote import APP_NAME, PDFJS_VERSION, VERSION, paths, settings
 from transnote.i18n import CATALOGUE, tr
 from transnote.server import TOKEN_HEADER, FORCE_HEADER, TransNoteServer
 
@@ -90,6 +90,18 @@ class ServerTest(unittest.TestCase):
         h = {TOKEN_HEADER: self.server.secret}
         h.update(extra or {})
         return h
+
+    def test_about_metadata_and_offline_licenses(self):
+        response, data = self.request("GET", "/api/ping")
+        self.assertEqual(response.status, 200)
+        self.assertEqual(json.loads(data), {"app": APP_NAME, "version": VERSION, "pdfjsVersion": PDFJS_VERSION})
+
+        response, _ = self.request("GET", "/api/about/licenses")
+        self.assertEqual(response.status, 403)
+        response, data = self.request("GET", "/api/about/licenses", headers=self.auth())
+        self.assertEqual(response.status, 200)
+        licenses = {license["name"]: license["text"] for license in json.loads(data)["licenses"]}
+        self.assertIn("GNU GENERAL PUBLIC LICENSE", licenses["GPL-3.0-or-later"])
 
     # --- 読み出し ---
     def test_get_whole_and_range(self):

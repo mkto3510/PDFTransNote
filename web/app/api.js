@@ -12,6 +12,14 @@ async function json(res) {
   return data;
 }
 
+export async function getAbout() {
+  return json(await fetch("/api/ping"));
+}
+
+export async function getLicenses() {
+  return (await json(await fetch("/api/about/licenses", { headers: AUTH }))).licenses;
+}
+
 /** 設定と既定値を読む． */
 export async function getSettings() {
   return json(await fetch("/api/settings", { headers: AUTH }));

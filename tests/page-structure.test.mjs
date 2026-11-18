@@ -920,3 +920,18 @@ test("キャプションの続き：文で終わるキャプション（3 行）
   for (const s of CAP) assert.deepEqual(kindOf(r, 0, pg, s), ["auxiliary", "caption"], s);
   assert.deepEqual(kindOf(r, 0, pg, bodyAfter[0].str), ["body", null]);
 });
+test("二段組：文字枠が重なっても右段の冒頭を選択に残す", () => {
+  const pieces = ["Left column, first line", "Left column, last line", "Right column, first line"]
+    .map((text, spanIndex) => ({ text, spanIndex, pageIndex: 0 }));
+  const page = {
+    classes: ["body", "body", "body"], kinds: [null, null, null], order: [1, 1, 2], lineOf: [0, 1, 2],
+    lines: [
+      { left: 0.1, right: 0.51, top: 0.81, bottom: 0.83 },
+      { left: 0.1, right: 0.47, top: 0.84, bottom: 0.86 },
+      { left: 0.5, right: 0.9, top: 0.17, bottom: 0.19 },
+    ],
+  };
+  const result = filterSelection(pieces, { pages: [page] });
+  assert.deepEqual(result.keep, [true, true, true]);
+  assert.deepEqual(result.order, [0, 1, 2]);
+});

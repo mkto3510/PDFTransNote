@@ -115,10 +115,44 @@ export class Popup {
     if (job) this.adopt(job);
     this.updateButtons();
     this.place();
-    if (!this.docked) new ResizeObserver(() => this.place()).observe(this.root);
+    if (!this.docked) {
+      this.resizeObserver = new ResizeObserver(() => this.place());
+      this.resizeObserver.observe(this.root);
+    }
+    this.sourceReady = anchor?.ready ? this.loadSelection(anchor.ready) : Promise.resolve(true);
+    if (!anchor && !this.source.value && target) {
+      bridge.sourceTextAsync(target).then((text) => {
+        if (!this.root.isConnected || this.source.value) return;
+        this.source.value = cleanSource(text);
+        this.updateButtons();
+      }).catch((error) => console.warn("[transnote] highlight text", error));
+    }
   }
 
   // --- 大きさを変える（浮かせたポップアップだけ） ---
+
+  async loadSelection(ready) {
+    this.pending = true;
+    this.source.readOnly = true;
+    this.setStatus(t("popup.analyzing"));
+    this.updateButtons();
+    const anchor = await ready;
+    if (!this.root.isConnected) return false;
+    if (!anchor) {
+      this.close();
+      return false;
+    }
+    this.anchor = anchor;
+    this.source.value = cleanSource(anchor.text);
+    this.skipped = this.makeSkipped();
+    if (this.skipped) this.source.after(this.skipped);
+    this.pending = false;
+    this.source.readOnly = false;
+    this.setStatus("");
+    this.updateButtons();
+    this.place();
+    return true;
+  }
 
   /** 右下の持ち手．ドラッグで大きさを変え，ダブルクリックで自動の大きさに戻す． */
   makeGrip() {
@@ -252,9 +286,10 @@ export class Popup {
   updateButtons() {
     const running = this.job && !this.job.finished;
     this.translateBtn.textContent = running ? t("popup.stop") : t("popup.translate");
-    this.translateBtn.disabled = !running && !this.source.value.trim();
-    this.autoBtn.disabled = !this.source.value.trim();
-    this.commitBtn.disabled = !this.output.value.trim() && !running;
+    this.translateBtn.disabled = this.pending || (!running && !this.source.value.trim());
+    this.autoBtn.disabled = this.pending || !this.source.value.trim();
+    for (const swatch of this.swatches) swatch.disabled = !!this.pending;
+    this.commitBtn.disabled = this.pending || (!this.output.value.trim() && !running);
   }
 
   /** ジョブの変化を映す． */
@@ -285,6 +320,7 @@ export class Popup {
   // --- 操作 ---
 
   onTranslate() {
+    if (this.pending) return;
     if (this.job && !this.job.finished) return this.job.cancel();
     const source = this.source.value.trim();
     if (!source) return;
@@ -342,14 +378,26 @@ export class Popup {
   }
 
   async onDelete() {
-    await this.ctx.deleteHighlight(this.target);
-    this.close();
+    this.deleteBtn.disabled = true;
+    try {
+      if (await this.ctx.deleteHighlight(this.target)) {
+        this.close();
+        return;
+      }
+      this.setStatus(t("popup.deleteFailed"), "error");
+    } catch (error) {
+      this.setStatus(t("popup.deleteFailed"), "error");
+      console.warn("[transnote] delete highlight", error);
+    } finally {
+      this.deleteBtn.disabled = false;
+    }
   }
 
   /** 閉じる．注釈にしていない翻訳は取り消す． */
   close() {
     if (this.job) this.ctx.dropPopupJob(this.job);
     this.job = null;
+    this.resizeObserver?.disconnect();
     this.root.remove();
     this.ctx.popupClosed(this);
   }
