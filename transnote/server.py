@@ -41,7 +41,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
-from . import APP_NAME, VERSION
+from . import APP_NAME, PDFJS_VERSION, VERSION, paths
 from . import settings as settings_mod
 from .i18n import normalize_lang, tr
 
@@ -296,7 +296,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._check_token()
                 return self._llm(path, method)
             if path == "/api/ping" and method == "GET":
-                return self._json(200, {"app": APP_NAME, "version": VERSION})
+                return self._json(200, {"app": APP_NAME, "version": VERSION, "pdfjsVersion": PDFJS_VERSION})
+            if path == "/api/about/licenses" and method == "GET":
+                self._check_token()
+                return self._about_licenses()
             raise HttpError(404, "not found")
         except HttpError as e:
             self._json(e.status, {"error": tr(self._lang(), e.message), **e.extra})
@@ -453,6 +456,19 @@ class Handler(BaseHTTPRequestHandler):
         self._json(200, {"ok": True, "size": len(body), "name": target.name, "original": same is not None})
 
     # --- 設定 ---
+    def _about_licenses(self) -> None:
+        root = paths.app_dir()
+        bundled = root / "LICENSES"
+        app_license = root / ("LICENSE.txt" if paths.is_frozen() else "LICENSE")
+        files = [("GPL-3.0-or-later", app_license)]
+        if bundled.is_dir():
+            files.extend((file.name, file) for file in sorted(bundled.glob("*.txt")))
+        else:
+            files.append(("PDF.js (Apache-2.0)", self.server.pdfjs_dir / "LICENSE"))
+        licenses = [{"name": name, "text": file.read_text(encoding="utf-8", errors="replace")}
+                    for name, file in files if file.is_file()]
+        self._json(200, {"licenses": licenses})
+
     def _settings_get(self) -> None:
         self._json(
             200,

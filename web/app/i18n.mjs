@@ -5,6 +5,15 @@
 // 値の {name} は t() の vars で置き換える．${sourceText} のような文字はそのまま残す（vars にない名前は触らない）．
 
 export const en = {
+  "about.title": "About PDF TransNote",
+  "about.summary": "Read PDFs, translate selected text, and keep the translation in a highlight comment.",
+  "about.source": "Source code on GitHub",
+  "about.licenses": "Open-source licenses",
+  "about.loading": "Loading…",
+  "about.unavailable": "The information could not be loaded.",
+  "about.close": "Close",
+  "popup.analyzing": "Preparing the selected text…",
+  "popup.deleteFailed": "Could not delete the highlight. Please try again.",
   // --- 全体（main.js） ---
   "app.settingsTitle": "PDF TransNote settings",
   "app.saveTitle": "Save (overwrite the original PDF) (Ctrl+S)",
@@ -173,6 +182,15 @@ export const en = {
 };
 
 export const ja = {
+  "about.title": "このソフトウェアについて",
+  "about.summary": "PDF を読みながら選んだ箇所を翻訳し，訳文をハイライトのコメントに保存できます．",
+  "about.source": "GitHub のソースコード",
+  "about.licenses": "オープンソースライセンス",
+  "about.loading": "読み込み中…",
+  "about.unavailable": "情報を読み込めませんでした．",
+  "about.close": "閉じる",
+  "popup.analyzing": "選択した文字を処理しています…",
+  "popup.deleteFailed": "ハイライトを削除できませんでした．もう一度お試しください．",
   // --- 全体（main.js） ---
   "app.settingsTitle": "PDF TransNote の設定",
   "app.saveTitle": "上書き保存（元の PDF に保存）（Ctrl+S）",

@@ -14,8 +14,8 @@
 // pdf.js に触れない計算（色，quadPoints の中の文字，並べ方）は highlight-math.mjs に分けてある．
 
 import { blendOpacity, compareHighlights, textInQuads } from "./highlight-math.mjs";
-import { analyzeDocument, DEFAULT_OPTIONS as STRUCTURE_DEFAULTS, filterSelection, keepHyphens } from "./page-structure.mjs";
-import { graphicsFromOperatorList } from "./page-graphics.mjs";
+import { DEFAULT_OPTIONS as STRUCTURE_DEFAULTS, filterSelection, keepHyphens } from "./page-structure.mjs";
+import { collectPageGeometry } from "./page-graphics.mjs";
 
 const HOOK_LABEL = "transnote";
 /** 一度に選べるページの数（長いと，pdf.js が途中のページの層を捨てることがある）． */
@@ -81,12 +81,22 @@ let fileHl = new Map(); // pageIndex → [{ id, pageIndex, quadPoints, color, op
 let fileHlLoading = new Map(); // pageIndex → Promise
 let fileHlIds = new Set(); // ファイルにあったハイライトの ID（canvas に描かせない）
 let fileHlVersion = 0;
-const contentCache = new Map(); // pageIndex → Promise<ページの文字（pageContent の値）>
-let scanned = []; // pageIndex → 読み終えたページの文字（分析に渡す．読んでいなければ undefined）
-let analysis = null; // 本文とそれ以外の分類（page-structure.mjs の analyzeDocument の値）
-let analysisDirty = true;
+let allHighlights = null;
+let editRevision = 0;
+let savedRevision = 0;
+const CONTENT_CACHE_LIMIT = 12;
+const contentCache = new Map();
+const contentLoading = new Map();
+const indexedPages = new Set();
+let structureWorker = null;
+let structureUnavailable = false;
+let structureRequest = 0;
+const structurePending = new Map();
+let selectionVersion = 0;
+let priorityReads = 0;
+const spanMaps = new WeakMap();
 const textCache = new Map(); // 注釈の ID → 範囲の文字
-const figureCache = new Map(); // pageIndex → ページの図（画像）と箱（塗った・囲んだ矩形）と罫線の矩形 {figures, boxes, rules, drawings}（表示の座標，0〜1）
+const indexedGraphics = new Set();
 
 /** 今の文書．文書が変わっていたら，覚えを捨てて，新しい文書の注釈の置き場を見張る． */
 function currentDoc() {
@@ -97,11 +107,20 @@ function currentDoc() {
     fileHlLoading = new Map();
     fileHlIds = new Set();
     fileHlVersion++;
+    allHighlights = null;
+    editRevision = savedRevision = 0;
     contentCache.clear();
-    figureCache.clear();
-    scanned = [];
-    analysis = null;
-    analysisDirty = true;
+    contentLoading.clear();
+    indexedPages.clear();
+    indexedGraphics.clear();
+    structureWorker?.terminate();
+    structureWorker = null;
+    structureUnavailable = false;
+    for (const resolve of structurePending.values()) resolve(null);
+    structurePending.clear();
+    selectionVersion++;
+    busyTargets.clear();
+    selectedTarget = null;
     textCache.clear();
     if (d) patchStorage(d.annotationStorage);
   }
@@ -145,7 +164,25 @@ function loadPageHighlights(pageIndex, pdfPage = null) {
   return p;
 }
 
-const loadAllHighlights = () => Promise.all(Array.from({ length: app()?.pagesCount ?? 0 }, (_, i) => loadPageHighlights(i)));
+function loadAllHighlights() {
+  if (allHighlights) return allHighlights;
+  const d = currentDoc();
+  if (!d) return Promise.resolve();
+  const first = Math.max(0, (app()?.page ?? 1) - 1);
+  return (allHighlights = (async () => {
+    await loadPageHighlights(first);
+    if (d !== currentDoc()) return;
+    highlightsChanged();
+    for (let start = 0; start < d.numPages; start += 4) {
+      if (d !== currentDoc()) return;
+      const count = Math.min(4, d.numPages - start);
+      const loaded = await Promise.all(Array.from({ length: count }, (_, offset) => loadPageHighlights(start + offset)));
+      if (d !== currentDoc()) return;
+      if (loaded.some((entries) => entries.length)) highlightsChanged();
+      await sleep(0);
+    }
+  })());
+}
 const fileData = (pageIndex, id) => fileHl.get(pageIndex)?.find((h) => h.id === id) ?? null;
 
 /**
@@ -177,7 +214,10 @@ function patchStorage(storage) {
     const original = storage[name];
     if (typeof original !== "function") continue;
     storage[name] = function (...args) {
+      const hadValue = this.has(args[0]);
       const r = original.apply(this, args);
+      if (this === doc?.annotationStorage &&
+          (name === "remove" ? hadValue : !!app()?._annotationStorageModified)) editRevision++;
       highlightsChanged();
       return r;
     };
@@ -257,10 +297,10 @@ function drawAllFileHighlights() {
 let changeTimer = null;
 /** ハイライトの一覧が変わった：独自の層を描き直し，少し後にまとめて app に知らせる． */
 function highlightsChanged() {
-  setTimeout(drawAllFileHighlights, 0);
   if (changeTimer) return;
   changeTimer = setTimeout(() => {
     changeTimer = null;
+    drawAllFileHighlights();
     emit("highlightsChanged");
   }, 150);
 }
@@ -502,31 +542,29 @@ function layerRotator(layer) {
  * 文字の層の span と，ページの文字の項目の番号の対応．pdf.js は，文字が空でない項目ごとに span を順に作る．
  * 覚えた項目の文字と合わなければ null（分類を使わない）．
  */
-function spanIndexMap(layer, pageIndex) {
-  const spans = [...layer.querySelectorAll(FONT_SPAN)];
-  const strs = scanned[pageIndex]?.items.filter((i) => typeof i.str === "string" && i.str !== "").map((i) => i.str);
-  if (!strs || spans.length > strs.length) return null;
-  for (const k of [0, spans.length >> 1, spans.length - 1]) {
-    if (spans[k] && spans[k].textContent !== strs[k]) {
-      console.warn("[transnote] text layer spans do not match the text content", pageIndex);
-      return null;
-    }
+function spanIndexMap(layer) {
+  let map = spanMaps.get(layer);
+  if (!map) {
+    const spans = [...layer.querySelectorAll(FONT_SPAN)];
+    map = new Map(spans.map((span, index) => [span, index]));
+    spanMaps.set(layer, map);
   }
-  return new Map(spans.map((s, k) => [s, k]));
+  return map;
 }
 
 /** 範囲 range の中の，文字の層 layer の断片（文書の順）． */
 function piecesInLayer(range, layer) {
   const pageIndex = pageIndexOf(layer);
-  const map = spanIndexMap(layer, pageIndex);
+  const map = spanIndexMap(layer);
   const toBox = layerRotator(layer);
-  const walker = document.createTreeWalker(layer, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
+  const scope = layer.contains(range.commonAncestorContainer) ? range.commonAncestorContainer : layer;
+  const walker = document.createTreeWalker(scope, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
     acceptNode: (n) =>
       n.nodeType === Node.ELEMENT_NODE ? (n.matches(SKIP_IN_LAYER) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_SKIP) : NodeFilter.FILTER_ACCEPT,
   });
   const out = [];
   const sub = document.createRange();
-  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+  for (let node = scope.nodeType === Node.TEXT_NODE ? scope : walker.nextNode(); node; node = walker.nextNode()) {
     if (!range.intersectsNode(node)) continue;
     const s = node === range.startContainer ? range.startOffset : 0;
     const e = node === range.endContainer ? range.endOffset : node.length;
@@ -543,7 +581,8 @@ function piecesInLayer(range, layer) {
       start: s,
       end: e,
       text: node.data.slice(s, e),
-      spanIndex: map?.get(span) ?? -1,
+      spanIndex: map.get(span) ?? -1,
+      spanText: span.textContent,
       boxes: rects.map(toBox),
       rect: union(rects),
     });
@@ -646,6 +685,8 @@ let missingLayer = false;
  */
 function captureAnchor({ notify = false } = {}) {
   missingLayer = false;
+  const sourceDoc = currentDoc();
+  const version = ++selectionVersion;
   const sel = document.getSelection();
   if (!sel || sel.isCollapsed || !sel.rangeCount) return null;
   const range = sel.getRangeAt(0);
@@ -669,14 +710,28 @@ function captureAnchor({ notify = false } = {}) {
     p.after = i - 1;
   });
   const backward = sel.anchorNode === range.endContainer && sel.anchorOffset === range.endOffset;
+  const text = layers.length === 1 && layers[0].contains(range.commonAncestorContainer) ? sel.toString() : null;
+  const anchor = makeAnchor(pieces, { text, backward });
+  if (!anchor) return null;
+  const pages = layers.map(pageIndexOf);
+  const options = filterOptions;
+  anchor.ready = classifySelection(sourceDoc, pages, pieces, options).then((result) => {
+    if (sourceDoc !== currentDoc() || version !== selectionVersion) return null;
+    return result ? filteredAnchor(pieces, result, options, text, backward) : anchor;
+  }).catch((error) => {
+    console.warn("[transnote] selection", error);
+    return sourceDoc === currentDoc() && version === selectionVersion ? anchor : null;
+  });
+  return anchor;
+}
 
+function filteredAnchor(pieces, a, options, text, backward) {
   // 本文に挟まれたものを除く
   let kept = pieces;
   let removed = [];
-  const a = currentAnalysis();
   if (a) {
     try {
-      const r = filterSelection(pieces, a, filterOptions);
+      const r = filterSelection(pieces, a, options);
       if (r.keep.some((k, i) => k && pieces[i].text.trim())) {
         // 残したものを読む順に並べる（段の後に描かれた見出しを除き，段の順に直す）
         const sorted = r.order.map((i) => pieces[i]);
@@ -707,9 +762,9 @@ function captureAnchor({ notify = false } = {}) {
   // 文字をこれまでどおり選択の文字にする
   const reordered = kept.some((p, i) => i > 0 && p.index < kept[i - 1].index);
   const simple =
-    !removed.length && !reordered && !kept.some((p) => p.para) && layers.length === 1 && layers[0].contains(range.commonAncestorContainer);
+    !removed.length && !reordered && !kept.some((p) => p.para);
   const words = a?.hyphenWords;
-  const anchor = makeAnchor(kept, { text: simple ? sel.toString() : null, removed, backward, words });
+  const anchor = makeAnchor(kept, { text: simple ? text : null, removed, backward, words });
   if (anchor && (removed.length || reordered)) {
     pieces.forEach((p, i) => {
       p.after = i - 1;
@@ -838,19 +893,24 @@ function resolveEditor(target) {
  * ページが描かれていないときは，描かれるまで待つ（ページは動かさない）．
  */
 async function withEditor(target, fn) {
+  const d = currentDoc();
   const ed = resolveEditor(target);
   if (ed) return fn(ed);
   if (target.kind !== "annotation") return false;
   if (!uiManager()?.getLayer(target.pageIndex)) {
-    await waitEvent("annotationeditorlayerrendered", (e) => e.pageNumber === target.pageIndex + 1, 24 * 3600 * 1000);
+    const layer = waitEvent("annotationeditorlayerrendered", (e) => e.pageNumber === target.pageIndex + 1);
+    app().page = target.pageIndex + 1;
+    await layer;
+    if (d !== currentDoc() || !uiManager()?.getLayer(target.pageIndex)) return false;
   }
   return inHighlightMode(async () => {
+    if (d !== currentDoc() || !isAlive(target)) return false;
     let found = editorForAnnotation(target.id, target.pageIndex);
     if (!found) {
       await waitEvent("editorsrendered", (e) => e.pageNumber === target.pageIndex + 1, 2000);
       found = editorForAnnotation(target.id, target.pageIndex);
     }
-    if (!found) return false;
+    if (d !== currentDoc() || !found || found.deleted) return false;
     Object.assign(target, { kind: "editor", editor: found });
     return fn(found);
   });
@@ -903,7 +963,10 @@ function writeComment(ed, text) {
 
 /** 書き換えが済んだら，一覧が変わったと知らせる． */
 const changed = (ok) => {
-  if (ok) highlightsChanged();
+  if (ok) {
+    editRevision++;
+    highlightsChanged();
+  }
   return ok;
 };
 
@@ -937,8 +1000,14 @@ async function remove(target) {
   if (!isAlive(target)) return false;
   return changed(
     !!(await withEditor(target, (ed) => {
-      for (const part of groupOf(ed)) part.remove(); // ファイルにあった注釈なら，消したことが記録され，保存で消える
-      return true;
+      const parts = groupOf(ed);
+      for (const part of parts) {
+        markBusyOne({ kind: "editor", editor: part }, "tnBusyMark", false);
+        pendingComments.delete(part);
+        part.remove();
+        drawFileHighlights(part.pageIndex);
+      }
+      return parts.length > 0 && parts.every((part) => !editorAlive(part));
     })),
   );
 }
@@ -995,7 +1064,12 @@ function redrawMarks(pageIndex) {
   const onPage = (t) => fracBoxes(t).pageIndex === pageIndex;
   for (const [key, t] of busyTargets) {
     if (t.kind === "editor" && !editorAlive(t.editor)) busyTargets.delete(key);
-    else if (onPage(t)) markBusyOne(t, "tnBusyMark", true);
+    else {
+      const ed = t.kind === "editor" ? t.editor : resolveEditor(t);
+      const members = ed && groups.get(ed);
+      const targets = members ? members.filter(editorAlive).map((editor) => ({ kind: "editor", editor })) : [t];
+      for (const target of targets) if (onPage(target)) markBusyOne(target, "tnBusyMark", true);
+    }
   }
   if (selectedTarget) {
     if (selectedTarget.kind === "editor" && !editorAlive(selectedTarget.editor)) selectedTarget = null;
@@ -1119,41 +1193,114 @@ const hasTextLayer = (pageIndex) => !!textLayerOf(pageIndex)?.querySelector("spa
  * 文字の層と同じ指定（印の項目を含め，文字を正規化しない）で取るので，項目の順と span の順が合う．
  * @returns {Promise<{view, rotate, items, styles} | null>}
  */
-function pageContent(pageIndex) {
-  let p = contentCache.get(pageIndex);
-  if (!p) {
-    const d = currentDoc();
-    p = d
-      ? d
-          .getPage(pageIndex + 1)
-          .then(async (page) => {
-            const tc = await page.getTextContent({ includeMarkedContent: true, disableNormalization: true });
-            const content = { view: page.view, rotate: page.rotate, items: tc.items, styles: tc.styles };
-            if (figureCache.has(pageIndex)) Object.assign(content, figureCache.get(pageIndex));
-            if (d === doc) {
-              scanned[pageIndex] = content;
-              analysisDirty = true;
-            }
-            return content;
-          })
-          .catch(() => null)
-      : Promise.resolve(null);
-    contentCache.set(pageIndex, p);
+function getStructureWorker() {
+  if (structureUnavailable) return null;
+  if (structureWorker) return structureWorker;
+  try {
+    const worker = new Worker(new URL("./structure-worker.mjs", import.meta.url), { type: "module" });
+    worker.onmessage = ({ data }) => {
+      const resolve = structurePending.get(data.requestId);
+      structurePending.delete(data.requestId);
+      if (data.error) console.warn("[transnote] structure", data.error);
+      resolve?.(data.error ? null : { pages: data.classified, matches: data.matches, hyphenWords: data.hyphenWords });
+    };
+    worker.onerror = (error) => {
+      console.warn("[transnote] structure worker", error.message);
+      worker.terminate();
+      structureWorker = null;
+      structureUnavailable = true;
+      for (const resolve of structurePending.values()) resolve(null);
+      structurePending.clear();
+    };
+    return (structureWorker = worker);
+  } catch (error) {
+    console.warn("[transnote] structure worker", error);
+    structureUnavailable = true;
+    return null;
   }
-  return p;
 }
 
-/** ページの文字の項目（印の項目を除く）． */
+function pageContent(pageIndex) {
+  const d = currentDoc();
+  if (!d) return Promise.resolve(null);
+  const cached = contentCache.get(pageIndex);
+  if (cached) {
+    contentCache.delete(pageIndex);
+    contentCache.set(pageIndex, cached);
+    return Promise.resolve(cached);
+  }
+  if (contentLoading.has(pageIndex)) return contentLoading.get(pageIndex);
+  const pending = d.getPage(pageIndex + 1).then(async (page) => {
+    const tc = await page.getTextContent({ includeMarkedContent: true, disableNormalization: true });
+    if (d !== currentDoc()) return null;
+    const content = { view: page.view, rotate: page.rotate, items: tc.items, styles: tc.styles };
+    const worker = getStructureWorker();
+    if (worker && !indexedPages.has(pageIndex)) {
+      worker.postMessage({ type: "text", pageIndex, content });
+      indexedPages.add(pageIndex);
+    }
+    contentCache.set(pageIndex, content);
+    if (contentCache.size > CONTENT_CACHE_LIMIT) contentCache.delete(contentCache.keys().next().value);
+    return content;
+  }).catch((error) => {
+    console.warn("[transnote] page text", pageIndex, error);
+    return null;
+  }).finally(() => {
+    if (contentLoading.get(pageIndex) === pending) contentLoading.delete(pageIndex);
+  });
+  contentLoading.set(pageIndex, pending);
+  return pending;
+}
+
 const textItems = (pageIndex) => pageContent(pageIndex).then((c) => (c ? c.items.filter((i) => typeof i.str === "string") : []));
 
-/** 文書を開いたら，裏で全ページの文字を読む（本文とそれ以外を見分けるため）．画面を止めないよう少しずつ． */
 async function scanDocument(d) {
-  const n = app()?.pagesCount ?? 0;
+  const n = d.numPages;
+  const visible = Math.max(0, (app()?.page ?? 1) - 1);
+  await pageContent(visible);
   for (let i = 0; i < n; i++) {
-    if (d !== doc) return;
+    if (d !== currentDoc() || structureUnavailable) return;
+    if (indexedPages.has(i)) continue;
+    while (priorityReads && d === currentDoc()) await sleep(16);
+    if (d !== currentDoc()) return;
     await pageContent(i);
-    if (i % 4 === 3) await sleep(0);
+    await sleep(0);
   }
+}
+
+async function classifySelection(d, pageIndices, pieces, options) {
+  if (!d) return null;
+  const worker = getStructureWorker();
+  if (!worker) return null;
+  const missingPages = pageIndices.filter((i) => !indexedPages.has(i));
+  if (missingPages.length) {
+    priorityReads++;
+    try {
+      await Promise.all(missingPages.map(pageContent));
+    } finally {
+      priorityReads--;
+    }
+  }
+  if (d !== currentDoc() || worker !== structureWorker) return null;
+  const spans = pieces.map(({ pageIndex, spanIndex, spanText }) => ({ pageIndex, spanIndex, text: spanText }));
+  const requestId = ++structureRequest;
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      structurePending.delete(requestId);
+      resolve(null);
+    }, 5000);
+    structurePending.set(requestId, (result) => {
+      clearTimeout(timer);
+      if (result) {
+        for (let i = 0; i < pieces.length; i++) if (!result.matches[i]) pieces[i].spanIndex = -1;
+      }
+      resolve(result);
+    });
+    worker.postMessage({
+      type: "selection", requestId, pageIndices, spans, pageCount: d.numPages,
+      furnitureBand: options.furnitureBand, sizeTolerance: options.sizeTolerance,
+    });
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -1164,7 +1311,7 @@ async function scanDocument(d) {
 
 /** ページを描き終えたら，その描画の命令から図の矩形を取り出して覚える． */
 function collectFigures(pageIndex) {
-  if (figureCache.has(pageIndex)) return;
+  if (indexedGraphics.has(pageIndex)) return;
   const page = app()?.pdfViewer?.getPageView(pageIndex)?.pdfPage;
   const states = page?._intentStates;
   if (!states?.values) return;
@@ -1172,34 +1319,16 @@ function collectFigures(pageIndex) {
     const ol = st?.operatorList;
     if (!ol?.lastChunk || !ol.fnArray?.length) continue;
     try {
-      const g = graphicsFromOperatorList(ol, page.getViewport({ scale: 1 }), lib().OPS);
-      figureCache.set(pageIndex, g);
-      if (scanned[pageIndex]) {
-        Object.assign(scanned[pageIndex], g);
-        if (g.figures.length || g.boxes.length || g.rules.length || g.drawings.length) analysisDirty = true;
-      }
+      const worker = getStructureWorker();
+      if (!worker) return;
+      const content = collectPageGeometry(ol, page.getViewport({ scale: 1 }), lib().OPS);
+      worker.postMessage({ type: "graphics", pageIndex, content });
+      indexedGraphics.add(pageIndex);
     } catch (e) {
       console.warn("[transnote] figures", pageIndex, e);
     }
     return;
   }
-}
-
-/** 本文とそれ以外の分類．読み終えたページだけで分ける（読んでいないページは分類なし）． */
-function currentAnalysis() {
-  if (!currentDoc()) return null;
-  if (analysisDirty || !analysis) {
-    const n = app()?.pagesCount ?? 0;
-    const pages = Array.from({ length: n }, (_, i) => scanned[i] ?? null);
-    try {
-      analysis = analyzeDocument(pages, { furnitureBand: filterOptions.furnitureBand, sizeTolerance: filterOptions.sizeTolerance });
-    } catch (e) {
-      console.error("[transnote] analyzeDocument", e);
-      analysis = null;
-    }
-    analysisDirty = false;
-  }
-  return analysis;
 }
 
 /** 本文の間から除くものの指定（app 側の設定から渡される）． */
@@ -1211,7 +1340,6 @@ function setSelectionFilter(options = {}) {
     if (options[k] === undefined) continue;
     next[k] = typeof STRUCTURE_DEFAULTS[k] === "boolean" ? !!options[k] : Number(options[k]);
   }
-  if (next.furnitureBand !== filterOptions.furnitureBand || next.sizeTolerance !== filterOptions.sizeTolerance) analysisDirty = true;
   filterOptions = next;
 }
 
@@ -1245,7 +1373,7 @@ async function sourceTextAsync(target) {
 }
 
 /** 一覧の 1 件． */
-async function describe(target) {
+function describe(target) {
   const { pageIndex, boxes } = fracBoxes(target);
   const first = boxes[0] ?? { x: 0, y: 0 };
   return {
@@ -1256,7 +1384,7 @@ async function describe(target) {
     left: first.x,
     color: getColor(target),
     comment: getComment(target),
-    text: await sourceTextAsync(target),
+    text: sourceText(target),
   };
 }
 
@@ -1268,17 +1396,16 @@ async function describe(target) {
 async function listHighlights() {
   const d = currentDoc();
   if (!d) return [];
-  await loadAllHighlights();
-  if (d !== doc) return [];
+  loadAllHighlights();
   const um = uiManager();
   const out = [];
   for (let p = 0; p < app().pagesCount; p++) {
     const eds = um ? [...um.getEditors(p)].filter((ed) => ed.editorType === "highlight" && !ed.isEmpty?.() && !ed.deleted) : [];
     const replaced = new Set(eds.map((ed) => ed.annotationElementId).filter(Boolean));
-    for (const ed of eds) out.push(await describe({ kind: "editor", editor: ed }));
+    for (const ed of eds) out.push(describe({ kind: "editor", editor: ed }));
     for (const h of fileHl.get(p) ?? []) {
       if (replaced.has(h.id) || um?.isDeletedAnnotationElement?.(h.id)) continue;
-      out.push(await describe({ kind: "annotation", id: h.id, pageIndex: p }));
+      out.push(describe({ kind: "annotation", id: h.id, pageIndex: p }));
     }
   }
   return out.sort(compareHighlights);
@@ -1538,6 +1665,25 @@ function addToolbarButton({ id, title, onClick }) {
   return b;
 }
 
+function addMenuButton({ id, label, dialogId, onClick }) {
+  const container = document.getElementById("secondaryToolbarButtonContainer");
+  if (!container) return;
+  const button = document.createElement("button");
+  button.id = id;
+  button.className = "toolbarButton labeled tnMenuButton";
+  button.type = "button";
+  button.setAttribute("aria-haspopup", "dialog");
+  button.setAttribute("aria-controls", dialogId);
+  const text = document.createElement("span");
+  text.textContent = label;
+  button.append(text);
+  button.addEventListener("click", () => {
+    app()?.secondaryToolbar?.close();
+    onClick();
+  });
+  container.append(button);
+}
+
 // ---------------------------------------------------------------------------
 // 7b. 左のパネル（pdf.js の ViewsManager）に「Annotations」のビューを足す
 // ---------------------------------------------------------------------------
@@ -1651,7 +1797,7 @@ function bindHighlights(a) {
   bus.on("annotationeditorstateschanged", highlightsChanged);
   bus.on("documentloaded", () => {
     const d = currentDoc();
-    scanDocument(d); // 本文とそれ以外を見分けるため，裏でページの文字を読む
+    if (d) scanDocument(d); // 本文とそれ以外を見分けるため，裏でページの文字を読む
     loadAllHighlights().then(() => {
       drawAllFileHighlights();
       highlightsChanged();
@@ -1683,6 +1829,12 @@ function bindLayout(a) {
   a.eventBus.on("pagerendered", (e) => {
     if (currentDoc() && e?.pageNumber) collectFigures(e.pageNumber - 1);
     if (e?.pageNumber) redrawMarks(e.pageNumber - 1);
+  });
+  a.eventBus.on("textlayerrendered", ({ pageNumber }) => {
+    if (!pageNumber || !currentDoc()) return;
+    const layer = textLayerOf(pageNumber - 1);
+    if (layer) spanMaps.delete(layer);
+    if (!indexedPages.has(pageNumber - 1)) pageContent(pageNumber - 1);
   });
   // 描かれていなかったページが描かれたら，書けなかったコメントをもう一度書く
   a.eventBus.on("annotationeditorlayerrendered", () => {
@@ -1762,6 +1914,7 @@ export const bridge = {
   setColor,
   remove,
   sourceText,
+  sourceTextAsync,
   markBusy,
   markSelected,
   keyOf,
@@ -1794,10 +1947,20 @@ export const bridge = {
 
   // 保存
   setSaveHandler: (fn) => (saveHandler = fn),
-  hasChanges: () => app()?.pdfDocument?.annotationStorage.size > 0 || !!app()?._annotationStorageModified,
-  isModified: () => !!app()?._annotationStorageModified,
-  saveData: () => app().pdfDocument.saveDocument(),
-  markSaved: () => app().pdfDocument.annotationStorage.resetModified(),
+  hasChanges: () => editRevision !== savedRevision || !!app()?._annotationStorageModified,
+  isModified: () => editRevision !== savedRevision || !!app()?._annotationStorageModified,
+  saveData: async () => {
+    const document = currentDoc();
+    if (editRevision === savedRevision && app()?._annotationStorageModified) editRevision++;
+    const revision = editRevision;
+    const data = await (document.annotationStorage.size ? document.saveDocument() : document.getData());
+    return { data, document, revision };
+  },
+  markSaved: ({ document, revision }) => {
+    if (document !== currentDoc()) return;
+    savedRevision = revision;
+    if (editRevision === revision) document.annotationStorage.resetModified();
+  },
   setBusy: (on) => document.getElementById("outerContainer")?.classList.toggle("transnoteSaving", !!on),
   setDirtyMark: (on) => document.documentElement.classList.toggle("transnoteDirty", !!on),
 
@@ -1823,6 +1986,7 @@ export const bridge = {
   setOpenHandler: (fn) => (openHandler = fn),
   setDropHandler: (fn) => (dropHandler = fn),
   addToolbarButton,
+  addMenuButton,
   /** 保存のボタン（上書き保存と，名前を付けて保存）の説明． */
   installSaveButtons,
   /** 「名前を付けて保存」を押したときの処理（なければ pdf.js の元のダウンロード）． */
