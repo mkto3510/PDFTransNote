@@ -39,6 +39,15 @@ const SEGMENT_GAP_LEFT = 1.5;
 const CELL_GAP = 1.5;
 /** ルビとみなす大きさ（付く行の文字に対する割合）の上限． */
 const RUBY_RATIO = 0.62;
+/**
+ * まとめられた下付き文字：pdf.js が下付きの文字（「T0」の「0」）とその後の本文を一つの item にし，item 全体に下付きの
+ * 大きさと基準線を付けることがある．一文字あたりの送り幅（大きさに対する割合）が前の文字よりこの倍数以上広く，
+ * 送り幅から推した大きさが前の文字の大きさに近ければ（MERGED_SIZE_TOL 以内），前の文字と同じ大きさ・基準線にする．
+ * 送り幅を比べるので，空白を除いて MERGED_MIN_CHARS 文字以上の item だけを見る．
+ */
+const MERGED_ADVANCE_RATIO = 1.15;
+const MERGED_SIZE_TOL = 0.15;
+const MERGED_MIN_CHARS = 4;
 const LOG_STEP = Math.log(1.02); // 本文の大きさは 2% 刻みで数える
 const round2 = (v) => Math.round(v * 100) / 100;
 const isBlank = (s) => !/\S/.test(s);
@@ -223,6 +232,8 @@ function buildPrep(page) {
       chars: blank ? 0 : countChars(str),
       artifact: artifactDepth > 0,
       rotated: Math.abs(angle) > 1,
+      vertical,
+      len,
       left,
       right,
       top,
@@ -230,6 +241,7 @@ function buildPrep(page) {
       base: dy(e, f), // 表示での基準線（回転していない文字のとき）
     });
   }
+  fixMergedSubscripts(items);
 
   // --- 行：描く順に続く item をまとめる ---
   const lines = [];
@@ -378,6 +390,60 @@ function buildPrep(page) {
     }
   }
   return { items, lines, lineOf, outLines, dispW, dispH, rotChars, totChars, sizesUpright, sizesAll };
+}
+
+/**
+ * まとめられた下付き文字の item（MERGED_ADVANCE_RATIO の説明を参照）の大きさと基準線を，直前の文字に合わせる．
+ * 例：「ture is maintained at」「T」「0. Equation (6.409) governing」（最後の item だけ 7.57 pt で，幅は 9.96 pt の文字の幅）．
+ * 位置の箱（left・right・top・bottom）は変えない．
+ */
+function fixMergedSubscripts(items) {
+  // ページの中の，大きさごとの一文字あたりの送り幅（大きさに対する割合）の中央値．10 文字以上の横書きの item から測る
+  const samples = new Map();
+  for (const it of items) {
+    if (it.blank || it.rotated || it.vertical || !(it.fh > 0) || !(it.len > 0) || it.str.length < 10) continue;
+    if (!samples.has(it.fh)) samples.set(it.fh, []);
+    samples.get(it.fh).push(it.len / it.str.length / it.fh);
+  }
+  const pageAdvance = new Map();
+  for (const [fh, v] of samples) {
+    v.sort((a, b) => a - b);
+    pageAdvance.set(fh, v[v.length >> 1]);
+  }
+  let pk = -1; // 直前の（空白でない）item
+  for (let k = 0; k < items.length; k++) {
+    const it = items[k];
+    if (it.blank) continue;
+    const p = pk >= 0 ? items[pk] : null;
+    const pIndex = pk;
+    pk = k;
+    if (!p || it.rotated || p.rotated || it.vertical || p.vertical) continue;
+    if (it.chars < MERGED_MIN_CHARS || !(it.fh > 0) || !(it.len > 0) || !(it.fh < 0.9 * p.fh)) continue;
+    const gap = it.left - p.right;
+    if (gap < -0.3 * p.fh || gap > p.fh) continue;
+    if (Math.abs(it.base - p.base) > 0.5 * p.fh) continue;
+    // 参照の送り幅：ページの中の同じ大きさの文字の中央値．なければ，直前から左へ続く，同じ大きさ・同じ基準線の item
+    // （直前の「M」1 文字のような数式の文字は幅が広く，それだけでは測れない）
+    let ref = pageAdvance.get(p.fh);
+    if (!ref) {
+      let w = 0;
+      let n = 0;
+      for (let j = pIndex, seen = 0; j >= 0 && seen < 20; j--) {
+        const q = items[j];
+        if (q.blank) continue;
+        if (q.rotated || q.vertical || q.fh !== p.fh || Math.abs(q.base - p.base) > 0.1 * p.fh) break;
+        w += q.len;
+        n += q.str.length;
+        seen++;
+      }
+      if (!(w > 0) || !n) continue;
+      ref = w / n / p.fh;
+    }
+    const r = it.len / it.str.length / it.fh / ref;
+    if (r < MERGED_ADVANCE_RATIO || Math.abs(it.fh * r - p.fh) > MERGED_SIZE_TOL * p.fh) continue;
+    it.fh = p.fh;
+    it.base = p.base;
+  }
 }
 
 /** 行の文字．間が空いた item の間には空白を入れる． */

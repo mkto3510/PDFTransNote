@@ -621,3 +621,41 @@ test("keepHyphens：文書の中にハイフン付きで書かれた語は，行
   assert.equal(keepHyphens("with the short-\nwavelength and transla-\ntion", r.hyphenWords), "with the short-wavelength and transla-\ntion");
   assert.equal(keepHyphens("a-\nb", null), "a-\nb");
 });
+
+// v0.3.1：pdf.js が下付きの文字と後の本文を一つの item にまとめ，下付きの大きさを付けたとき（Geodynamics p.363 の段の最後の行）
+const mergedSubscriptPage = (advance) => {
+  const tail = "0. Equation (6.409) governing";
+  const lastLine = [
+    t("ture is maintained at", 72, 86),
+    t(" ", 177, 86),
+    t("T", 180, 86),
+    t(tail, 186, 84.4, 7.57, { width: 0.5 * advance * tail.length }),
+  ];
+  return page([...para(20, { y: 700 }), ...para(8, { y: 194 }), t("the upper boundary of the channel whose tempera-", 72, 98), ...lastLine]);
+};
+
+test("まとめられた下付き文字：送り幅が本文の大きさの item は本文の大きさに直し，段の最後の行も本文", () => {
+  const pg = mergedSubscriptPage(10);
+  const r = analyzeDocument([pg]);
+  assert.deepEqual(kindOf(r, 0, pg, "0. Equation (6.409) governing"), ["body", null]);
+  assert.deepEqual(kindOf(r, 0, pg, "ture is maintained at"), ["body", null]);
+});
+
+test("まとめられた下付き文字：送り幅も小さい（本当に小さい文字）なら直さない", () => {
+  const pg = mergedSubscriptPage(7.57);
+  const r = analyzeDocument([pg]);
+  assert.deepEqual(kindOf(r, 0, pg, "0. Equation (6.409) governing"), ["auxiliary", "small"]);
+});
+
+test("まとめられた下付き文字：直前が幅の広い数式の文字 1 字（「M」）でも，ページの本文の送り幅と比べて直す", () => {
+  const tail = "0. We assume as we did for purely elastic";
+  const pg = page([
+    ...para(20, { y: 700 }),
+    ...para(8, { y: 194 }),
+    t("Let us consider the state of stress in the plate when", 72, 98),
+    t("M", 72, 86, 10, { width: 9.9 }),
+    t(tail, 82, 84.4, 7.57, { width: 0.5 * 10 * tail.length }),
+  ]);
+  const r = analyzeDocument([pg]);
+  assert.deepEqual(kindOf(r, 0, pg, tail), ["body", null]);
+});
