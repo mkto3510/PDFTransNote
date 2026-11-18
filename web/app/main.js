@@ -290,6 +290,7 @@ const ctx = {
   openEditor: (job) => openPopup({ target: job.meta.target, job }),
   /** カードから：そのハイライトへ移動して，注釈ポップアップを開く． */
   openHighlight: (target) => {
+    if (!bridge.isAlive(target)) return;
     bridge.scrollTo(target);
     openPopup({ target });
   },
@@ -301,6 +302,7 @@ const ctx = {
  */
 function openPopup(options) {
   const { target, job } = options;
+  if (target && !bridge.isAlive(target)) return;
   // 付いているカードをもう一度押しただけなら，開き直さない（入力中の文字を残す）
   if (target && !job && popup?.docked && sidebar?.dockKey === bridge.keyOf(target)) return;
   popup?.close();

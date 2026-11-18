@@ -2,6 +2,10 @@
 
 このファイルには，公開した版ごとの主な変更を書きます．版の付け方は [Semantic Versioning](https://semver.org/lang/ja/) に従います．
 
+## [0.4.1] - 2026-11-18
+
+- 削除済みのハイライトの位置をクリックすると，点線の枠と注釈のポップアップが再表示される不具合を修正した．
+
 ## [0.4.0] - 2026-11-18
 
 - 選択した箇所の解析をバックグラウンドで行い，選択したページを優先するようにした．注釈一覧は表示中のページから読み始める．
@@ -88,6 +92,7 @@
 - Zotero と同じ 8 色のハイライト．Zotero の「PDF 文書を開く」から使える．
 - インストーラー（Inno Setup 7）と，解凍するだけで使える zip．
 
+[0.4.1]: https://github.com/mkto3510/PDFTransNote/releases/tag/v0.4.1
 [0.4.0]: https://github.com/mkto3510/PDFTransNote/releases/tag/v0.4.0
 [0.3.2]: https://github.com/mkto3510/PDFTransNote/releases/tag/v0.3.2
 [0.3.1]: https://github.com/mkto3510/PDFTransNote/releases/tag/v0.3.1
