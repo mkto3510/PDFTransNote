@@ -28,10 +28,13 @@ const FALLBACK = {
   skipCaptions: true,
   skipSmallText: true,
   sizeTolerance: 6,
+  skipMarginNotes: true,
+  skipRuby: true,
   popupWidth: 0,
   popupHeight: 0,
   uiLang: "en",
   backupCount: 5,
+  editorTools: { comment: true, highlight: true, freetext: true, ink: true, stamp: true },
 };
 
 let settings = null;
@@ -54,7 +57,10 @@ function applySettings(s) {
     skipCaptions: s.skipCaptions,
     skipSmallText: s.skipSmallText,
     sizeTolerance: s.sizeTolerance,
+    skipMarginNotes: s.skipMarginNotes,
+    skipRuby: s.skipRuby,
   });
+  bridge.setEditorTools?.(s.editorTools ?? {});
   popup?.refresh();
 }
 
@@ -123,6 +129,31 @@ async function saveToFile({ force = false, manual = false } = {}) {
 }
 
 const saver = new SaveScheduler(() => saveToFile());
+
+/**
+ * 名前を付けて保存：デスクトップではファイルのダイアログで選んだ場所に書く（開いている PDF はそのまま）．
+ * ブラウザーでは pdf.js の元の保存（ダウンロード）．
+ */
+async function saveAs() {
+  if (!bridge.hasDocument()) return;
+  if (!api.inDesktop) return bridge.downloadCopy();
+  const docToken = decodeURIComponent(bridge.docUrl()).split("/")[2] ?? "";
+  const target = await api.saveAsDialog(docToken);
+  if (!target) return;
+  bridge.setBusy(true);
+  try {
+    const data = await bridge.saveData();
+    const { status, ok, info } = await api.putSaveAs(target, data);
+    if (!ok) throw new Error(info.error || `${status}`);
+    if (info.original) bridge.markSaved(); // 開いている PDF そのものを選んだ
+    toast(t("save.asDone", { name: info.name }), "ok");
+  } catch (e) {
+    toast(t("save.failed", { message: e.message }), "error");
+  } finally {
+    bridge.setBusy(false);
+    reportDirty(true);
+  }
+}
 const requestSave = () => (settings?.saveOnComment ?? true) && saver.request();
 
 // ---------------------------------------------------------------------------
@@ -281,6 +312,12 @@ function bindPopupEvents() {
         popup.close();
         return;
       }
+      if (e.ctrlKey && e.shiftKey && !e.altKey && (e.key === "s" || e.key === "S")) {
+        e.preventDefault();
+        e.stopPropagation();
+        saveAs();
+        return;
+      }
       if (!e.altKey || e.ctrlKey || (e.key !== "t" && e.key !== "T")) return;
       const anchor = bridge.currentAnchor();
       if (!anchor) return;
@@ -322,7 +359,8 @@ bridge.on("ready", async () => {
   sidebar = new AnnotationSidebar(ctx);
   settingsDialog = new SettingsDialog({ toast, applySettings, canReload });
   bridge.addToolbarButton({ id: "transnoteGear", title: t("app.settingsTitle"), onClick: () => settingsDialog.open() });
-  bridge.setSaveButtonTitle(t("app.saveTitle"));
+  bridge.installSaveButtons({ saveTitle: t("app.saveTitle"), saveAsTitle: t("app.saveAsTitle") });
+  bridge.setSaveAsHandler(saveAs);
   bridge.setSidebarOptionLabel(t("sidebar.optionLabel"));
   bridge.setSaveHandler(async ({ manual }) => {
     if (!bridge.hasChanges()) {

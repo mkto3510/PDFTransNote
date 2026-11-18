@@ -53,10 +53,16 @@ DEFAULTS: dict[str, Any] = {
     "skipCaptions": True,  # 図表の見出し
     "skipSmallText": True,  # 本文より小さい文字・回転した文字（脚注，表，図の中の文字）
     "sizeTolerance": 6,  # 本文より何 % 小さければ「小さい」とするか
+    "skipMarginNotes": True,  # 本文の枠の外（余白）にある注
+    "skipRuby": True,  # ルビ（ふりがな）
     "popupWidth": 0,  # ポップアップの大きさ（px．0 は自動）
     "popupHeight": 0,
     "backupCount": 5,  # data/backups に残す数（すべての PDF をまとめて数える．0 なら取らない）
+    # ツールバーに出す PDF.js の編集のボタン（コメント・強調・フリーテキスト・インク・画像）
+    "editorTools": {"comment": True, "highlight": True, "freetext": True, "ink": True, "stamp": True},
 }
+
+EDITOR_TOOLS = ("comment", "highlight", "freetext", "ink", "stamp")
 
 UI_LANGS = ("en", "ja")
 MAX_SERVICES = 20
@@ -278,10 +284,23 @@ def validate(values: dict[str, Any], *, strict: bool = True) -> dict[str, Any]:
     take("furnitureBand", int_range("The header and footer band", 3, 25))
     take("skipCaptions", _as_bool)
     take("skipSmallText", _as_bool)
+    take("skipMarginNotes", _as_bool)
+    take("skipRuby", _as_bool)
     take("sizeTolerance", int_range("The size difference", 2, 30))
     take("popupWidth", popup_size("The popup width"))
     take("popupHeight", popup_size("The popup height"))
     take("backupCount", int_range("Backups to keep", 0, 200))
+
+    def editor_tools(v):
+        if not isinstance(v, dict):
+            raise SettingsError("Invalid editing buttons")
+        tools = dict(out["editorTools"])
+        for k in EDITOR_TOOLS:
+            if k in v:
+                tools[k] = _as_bool(v[k])
+        return tools
+
+    take("editorTools", editor_tools)
     return out
 
 

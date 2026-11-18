@@ -221,6 +221,46 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(self.pdf.read_bytes(), PDF_BYTES)
         self.assertEqual(list(self.pdf.parent.glob("*.transnote-tmp")), [])
 
+    # --- 名前を付けて保存 ---
+    def test_save_as_writes_registered_target_once(self):
+        target = Path(self.tmp.name) / "copy" / "別名.pdf"
+        target.parent.mkdir()
+        token = self.server.registry.register_target(target)
+        # トークンがなければ断る
+        resp, _ = self.request("PUT", f"/save-as/{token}", body=PDF_BYTES + b"%a\n")
+        self.assertEqual(resp.status, 403)
+        resp, data = self.request("PUT", f"/save-as/{token}", body=PDF_BYTES + b"%a\n", headers=self.auth())
+        self.assertEqual(resp.status, 200, data)
+        info = json.loads(data)
+        self.assertEqual(info["name"], "別名.pdf")
+        self.assertFalse(info["original"])
+        self.assertEqual(target.read_bytes(), PDF_BYTES + b"%a\n")
+        self.assertEqual(self.pdf.read_bytes(), PDF_BYTES)  # 開いている PDF はそのまま
+        # 行き先は 1 回だけ使える
+        resp, _ = self.request("PUT", f"/save-as/{token}", body=PDF_BYTES, headers=self.auth())
+        self.assertEqual(resp.status, 404)
+        # 登録していない行き先には書けない
+        resp, _ = self.request("PUT", "/save-as/unknown", body=PDF_BYTES, headers=self.auth())
+        self.assertEqual(resp.status, 404)
+
+    def test_save_as_rejects_non_pdf(self):
+        target = Path(self.tmp.name) / "x.pdf"
+        token = self.server.registry.register_target(target)
+        resp, _ = self.request("PUT", f"/save-as/{token}", body=b"hello", headers=self.auth())
+        self.assertEqual(resp.status, 400)
+        self.assertFalse(target.exists())
+
+    def test_save_as_onto_open_document_backs_up(self):
+        token = self.server.registry.register_target(self.pdf)
+        resp, data = self.request("PUT", f"/save-as/{token}", body=PDF_BYTES + b"%b\n", headers=self.auth())
+        self.assertEqual(resp.status, 200, data)
+        self.assertTrue(json.loads(data)["original"])
+        self.assertEqual(self.pdf.read_bytes(), PDF_BYTES + b"%b\n")
+        self.assertEqual(len(list(self.backups.glob("*.pdf"))), 1)
+        # 続けて上書き保存しても，ほかのアプリの変更とは見なさない
+        resp, _ = self.request("PUT", self.doc.url, body=PDF_BYTES + b"%c\n", headers=self.auth())
+        self.assertEqual(resp.status, 200)
+
     # --- 設定 ---
     def test_settings_roundtrip(self):
         resp, data = self.request("GET", "/api/settings")
@@ -436,6 +476,17 @@ class SettingsTest(unittest.TestCase):
                 settings.validate(bad)
         # ファイルを読むときは，正しくない値を既定値に戻す
         self.assertEqual(settings.validate({"uiLang": "fr", "backupCount": 999}, strict=False)["backupCount"], 5)
+
+    def test_selection_and_editor_tool_options(self):
+        d = settings.defaults()
+        self.assertEqual((d["skipMarginNotes"], d["skipRuby"]), (True, True))
+        self.assertEqual(d["editorTools"], {"comment": True, "highlight": True, "freetext": True, "ink": True, "stamp": True})
+        v = settings.validate({"skipMarginNotes": False, "skipRuby": "false", "editorTools": {"ink": False, "stamp": "0", "unknown": False}})
+        self.assertEqual((v["skipMarginNotes"], v["skipRuby"]), (False, False))
+        self.assertEqual(v["editorTools"], {"comment": True, "highlight": True, "freetext": True, "ink": False, "stamp": False})
+        with self.assertRaises(settings.SettingsError):
+            settings.validate({"editorTools": ["ink"]})
+        self.assertEqual(settings.validate({"editorTools": "x"}, strict=False)["editorTools"], d["editorTools"])
 
     def test_endpoint_urls(self):
         self.assertEqual(settings.chat_url("http://localhost:1234"), "http://localhost:1234/v1/chat/completions")

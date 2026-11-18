@@ -6,12 +6,12 @@
 ;   - 設定などはアプリのフォルダの data\ に置く（アプリ側の仕組み）．上書きで入れ直しても data\ は残る．
 ;     アンインストールのときは，data\ も消すかを尋ねる（既定は「残す」．サイレントのときは尋ねずに残す）．
 ;   - レジストリをまったく使わないポータブル版は，build.ps1 が作る zip のほう．
-; 作り方：build.ps1 から ISCC.exe /DAppVersion=0.2.0 installer\PdfTransNote.iss
+; 作り方：build.ps1 から ISCC.exe /DAppVersion=0.3.0 installer\PdfTransNote.iss
 
 #define AppName "PDF TransNote"
 #define AppExe "PdfTransNote.exe"
 #ifndef AppVersion
-  #define AppVersion "0.2.0"
+  #define AppVersion "0.3.0"
 #endif
 #define SourceDir "..\dist\PdfTransNote"
 

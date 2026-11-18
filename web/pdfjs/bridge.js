@@ -14,7 +14,7 @@
 // pdf.js に触れない計算（色，quadPoints の中の文字，並べ方）は highlight-math.mjs に分けてある．
 
 import { blendOpacity, compareHighlights, textInQuads } from "./highlight-math.mjs";
-import { analyzeDocument, DEFAULT_OPTIONS as STRUCTURE_DEFAULTS, filterSelection } from "./page-structure.mjs";
+import { analyzeDocument, DEFAULT_OPTIONS as STRUCTURE_DEFAULTS, filterSelection, keepHyphens } from "./page-structure.mjs";
 
 const HOOK_LABEL = "transnote";
 /** 一度に選べるページの数（長いと，pdf.js が途中のページの層を捨てることがある）． */
@@ -85,6 +85,7 @@ let scanned = []; // pageIndex → 読み終えたページの文字（分析に
 let analysis = null; // 本文とそれ以外の分類（page-structure.mjs の analyzeDocument の値）
 let analysisDirty = true;
 const textCache = new Map(); // 注釈の ID → 範囲の文字
+const figureCache = new Map(); // pageIndex → ページの図（画像）の矩形（表示の座標，0〜1）
 
 /** 今の文書．文書が変わっていたら，覚えを捨てて，新しい文書の注釈の置き場を見張る． */
 function currentDoc() {
@@ -96,6 +97,7 @@ function currentDoc() {
     fileHlIds = new Set();
     fileHlVersion++;
     contentCache.clear();
+    figureCache.clear();
     scanned = [];
     analysis = null;
     analysisDirty = true;
@@ -395,6 +397,74 @@ function inHighlightMode(fn) {
 }
 
 // ---------------------------------------------------------------------------
+// 2b. 編集のモード（コメント・強調・フリーテキスト・インク・画像）は，ツールバーのボタンを押したときだけ
+// ---------------------------------------------------------------------------
+// pdf.js は，ハイライトを選んだとき（setSelected → updateToolbar），注釈をダブルクリックしたとき，
+// 内部の .click() などで，勝手に編集のモードへ切り替える．切り替えはどれも eventBus の
+// "switchannotationeditormode" を通るので，そこで止める．通すのは，通常のモードに戻すとき，
+// 人がツールバーの編集のボタンを押した直後（isTrusted のクリック），bridge 自身の一時的な切り替えのときだけ．
+
+/** 設定の名前 → ツールバーのボタンを包む要素の ID． */
+const EDITOR_TOOLS = { comment: "editorComment", highlight: "editorHighlight", freetext: "editorFreeText", ink: "editorInk", stamp: "editorStamp" };
+let editorToolsOn = { comment: true, highlight: true, freetext: true, ink: true, stamp: true };
+let userToolClick = false;
+
+/** pdf.js のモードの番号 → 設定の名前（知らないモードは null）． */
+function toolOfMode(mode) {
+  const T = EditorType();
+  if (mode === T.POPUP) return "comment";
+  if (mode === T.HIGHLIGHT) return "highlight";
+  if (mode === T.FREETEXT) return "freetext";
+  if (mode === T.INK) return "ink";
+  if (mode === T.STAMP) return "stamp";
+  return null;
+}
+
+function modeAllowed(mode) {
+  if (mode === EditorType().NONE || transientMode) return true;
+  const tool = toolOfMode(mode);
+  if (tool && !editorToolsOn[tool]) return false;
+  return userToolClick;
+}
+
+let modesGated = false;
+function gateEditorModes(a) {
+  const bus = a.eventBus;
+  if (!bus || modesGated) return;
+  modesGated = true;
+  // eventBus は拡張できない（Object.preventExtensions）ので，クラスの dispatch を包み，この eventBus のときだけ調べる
+  const proto = Object.getPrototypeOf(bus);
+  const dispatch = proto.dispatch;
+  proto.dispatch = function (name, data, ...rest) {
+    if (this === bus && name === "switchannotationeditormode" && data && !modeAllowed(data.mode)) return;
+    return dispatch.call(this, name, data, ...rest);
+  };
+  // ボタンの処理（pdf.js の Toolbar）より先に印を付け，同じクリックの処理が終わったら外す
+  document.getElementById("editorModeButtons")?.addEventListener(
+    "click",
+    (e) => {
+      if (!e.isTrusted) return;
+      userToolClick = true;
+      setTimeout(() => (userToolClick = false), 0);
+    },
+    true,
+  );
+}
+
+/** ツールバーに出す編集のボタン（{comment, highlight, freetext, ink, stamp}：false なら隠し，そのモードにも入らない）． */
+function setEditorTools(options = {}) {
+  editorToolsOn = { ...editorToolsOn };
+  for (const k of Object.keys(EDITOR_TOOLS)) if (typeof options[k] === "boolean") editorToolsOn[k] = options[k];
+  for (const [k, id] of Object.entries(EDITOR_TOOLS)) document.getElementById(id)?.classList.toggle("tnToolOff", !editorToolsOn[k]);
+  const any = Object.values(editorToolsOn).some(Boolean);
+  document.getElementById("editorModeSeparator")?.classList.toggle("tnToolOff", !any);
+  // 今のモードのボタンを隠したら，通常のモードに戻す
+  const um = uiManager();
+  const tool = um ? toolOfMode(um.getMode()) : null;
+  if (tool && !editorToolsOn[tool]) app().eventBus.dispatch("switchannotationeditormode", { source: window, mode: EditorType().NONE });
+}
+
+// ---------------------------------------------------------------------------
 // 3. 選んだ範囲の記録とハイライトの作成
 // ---------------------------------------------------------------------------
 
@@ -511,7 +581,7 @@ function joinPieces(pieces) {
     if (prev) {
       const newLine =
         p.pageIndex !== prev.pageIndex || p.after !== prev.index || p.rect.top > prev.rect.bottom - p.rect.height / 2 || p.rect.bottom < prev.rect.top;
-      if (newLine) out += "\n";
+      if (newLine) out += p.para ? "\n\n" : "\n";
     }
     out += p.text;
     prev = p;
@@ -544,10 +614,10 @@ function buildParts(pieces) {
 }
 
 /** 断片の並びから anchor を作る（removed は除いた部分の一覧）． */
-function makeAnchor(pieces, { text = null, removed = [], backward = false } = {}) {
+function makeAnchor(pieces, { text = null, removed = [], backward = false, words = null } = {}) {
   const parts = buildParts(pieces);
   if (!parts.length) return null;
-  const joined = text ?? joinPieces(pieces);
+  const joined = keepHyphens(text ?? joinPieces(pieces), words);
   if (!joined.trim()) return null;
   return {
     text: joined,
@@ -606,9 +676,22 @@ function captureAnchor({ notify = false } = {}) {
   if (a) {
     try {
       const r = filterSelection(pieces, a, filterOptions);
-      if (r.keep.some((k) => !k) && r.keep.some((k, i) => k && pieces[i].text.trim())) {
-        kept = pieces.filter((_, i) => r.keep[i]);
-        removed = r.removed;
+      if (r.keep.some((k, i) => k && pieces[i].text.trim())) {
+        // 残したものを読む順に並べる（段の後に描かれた見出しを除き，段の順に直す）
+        const sorted = r.order.map((i) => pieces[i]);
+        if (r.keep.some((k) => !k) || sorted.some((p, i) => p !== pieces[i])) {
+          kept = sorted;
+          removed = r.removed;
+        }
+      }
+      // 段落の始まりの行（字下げ）の最初の切れ端には印を付ける（原文で段落を分ける）
+      let lastLine = null;
+      for (const p of kept) {
+        const pa = a.pages?.[p.pageIndex];
+        const li = p.spanIndex >= 0 ? (pa?.lineOf?.[p.spanIndex] ?? -1) : -1;
+        const key = `${p.pageIndex}:${li}`;
+        p.para = li >= 0 && key !== lastLine && !!pa?.paraStart?.[li];
+        lastLine = key;
       }
     } catch (e) {
       console.error("[transnote] filterSelection", e);
@@ -619,12 +702,19 @@ function captureAnchor({ notify = false } = {}) {
     if (i > 0) p.after = kept[i - 1].index === p.index - 1 ? p.index - 1 : -1;
   });
 
-  // 1 ページの中で，何も除かず，範囲が文字の層の中に収まるときは，文字をこれまでどおり選択の文字にする
-  const simple = !removed.length && layers.length === 1 && layers[0].contains(range.commonAncestorContainer);
-  const anchor = makeAnchor(kept, { text: simple ? sel.toString() : null, removed, backward });
-  if (anchor && removed.length) {
-    pieces.forEach((p, i) => (p.after = i - 1));
-    anchor.raw = makeAnchor(pieces, { backward });
+  // 1 ページの中で，何も除かず，並べ替えも段落の切れ目もなく，範囲が文字の層の中に収まるときは，
+  // 文字をこれまでどおり選択の文字にする
+  const reordered = kept.some((p, i) => i > 0 && p.index < kept[i - 1].index);
+  const simple =
+    !removed.length && !reordered && !kept.some((p) => p.para) && layers.length === 1 && layers[0].contains(range.commonAncestorContainer);
+  const words = a?.hyphenWords;
+  const anchor = makeAnchor(kept, { text: simple ? sel.toString() : null, removed, backward, words });
+  if (anchor && (removed.length || reordered)) {
+    pieces.forEach((p, i) => {
+      p.after = i - 1;
+      p.para = false;
+    });
+    anchor.raw = makeAnchor(pieces, { backward, words });
   }
   return anchor;
 }
@@ -1004,6 +1094,7 @@ function pageContent(pageIndex) {
           .then(async (page) => {
             const tc = await page.getTextContent({ includeMarkedContent: true, disableNormalization: true });
             const content = { view: page.view, rotate: page.rotate, items: tc.items, styles: tc.styles };
+            if (figureCache.has(pageIndex)) content.figures = figureCache.get(pageIndex);
             if (d === doc) {
               scanned[pageIndex] = content;
               analysisDirty = true;
@@ -1027,6 +1118,78 @@ async function scanDocument(d) {
     if (d !== doc) return;
     await pageContent(i);
     if (i % 4 === 3) await sleep(0);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 図の位置：pdf.js がページを描いたときの描画の命令（operatorList）から，画像の矩形を集める．
+// 選んだ文字が画像の上にあれば，図の中の文字とする（page-structure.mjs の figures）．
+// 線画は使わない（枠で囲んだ本文なども拾ってしまうため）．ページ全体を覆う画像（スキャン）は page-structure.mjs が外す．
+// operatorList は pdf.js の内部の値（PDFPageProxy._intentStates）なので，pdf.js を更新したら確かめること．
+
+/** 描画の命令をたどり，画像の矩形を表示の座標（0〜1）で返す． */
+function figuresFromOperatorList(opList, viewport) {
+  const O = lib().OPS;
+  const IMAGE_OPS = new Set([O.paintImageXObject, O.paintInlineImageXObject, O.paintImageMaskXObject, O.paintImageXObjectRepeat]);
+  const mul = (A, B) => [
+    A[0] * B[0] + A[2] * B[1],
+    A[1] * B[0] + A[3] * B[1],
+    A[0] * B[2] + A[2] * B[3],
+    A[1] * B[2] + A[3] * B[3],
+    A[0] * B[4] + A[2] * B[5] + A[4],
+    A[1] * B[4] + A[3] * B[5] + A[5],
+  ];
+  let ctm = [1, 0, 0, 1, 0, 0];
+  const stack = [];
+  const out = [];
+  const { fnArray, argsArray } = opList;
+  for (let i = 0; i < fnArray.length; i++) {
+    const fn = fnArray[i];
+    const args = argsArray[i];
+    if (fn === O.save) stack.push(ctm);
+    else if (fn === O.restore) ctm = stack.pop() ?? ctm;
+    else if (fn === O.transform) ctm = mul(ctm, args);
+    else if (fn === O.paintFormXObjectBegin) {
+      stack.push(ctm);
+      if (Array.isArray(args?.[0]) && args[0].length === 6) ctm = mul(ctm, args[0]);
+    } else if (fn === O.paintFormXObjectEnd) ctm = stack.pop() ?? ctm;
+    else if (IMAGE_OPS.has(fn)) {
+      const pts = [
+        [0, 0],
+        [1, 0],
+        [0, 1],
+        [1, 1],
+      ].map(([x, y]) => viewport.convertToViewportPoint(ctm[0] * x + ctm[2] * y + ctm[4], ctm[1] * x + ctm[3] * y + ctm[5]));
+      const xs = pts.map((p) => p[0] / viewport.width);
+      const ys = pts.map((p) => p[1] / viewport.height);
+      const r = { left: Math.min(...xs), right: Math.max(...xs), top: Math.min(...ys), bottom: Math.max(...ys) };
+      // 小さな画像（記号・飾り）は数えない
+      if ((r.right - r.left) * (r.bottom - r.top) >= 0.01) out.push(r);
+    }
+  }
+  return out;
+}
+
+/** ページを描き終えたら，その描画の命令から図の矩形を取り出して覚える． */
+function collectFigures(pageIndex) {
+  if (figureCache.has(pageIndex)) return;
+  const page = app()?.pdfViewer?.getPageView(pageIndex)?.pdfPage;
+  const states = page?._intentStates;
+  if (!states?.values) return;
+  for (const st of states.values()) {
+    const ol = st?.operatorList;
+    if (!ol?.lastChunk || !ol.fnArray?.length) continue;
+    try {
+      const figures = figuresFromOperatorList(ol, page.getViewport({ scale: 1 }));
+      figureCache.set(pageIndex, figures);
+      if (scanned[pageIndex]) {
+        scanned[pageIndex].figures = figures;
+        if (figures.length) analysisDirty = true;
+      }
+    } catch (e) {
+      console.warn("[transnote] figures", pageIndex, e);
+    }
+    return;
   }
 }
 
@@ -1244,11 +1407,102 @@ function hookOpenFile(a) {
   });
 }
 
+/** pdf.js の元の保存（注釈を入れた PDF をダウンロードする）．ブラウザーでの「名前を付けて保存」に使う． */
+let pdfjsDownload = null;
+
 function hookSave(a) {
+  pdfjsDownload = a.downloadOrSave.bind(a);
+  // Ctrl+S とツールバーの保存（pdf.js の "download"）は，元の PDF への上書き保存にする
   a.downloadOrSave = async function () {
     uiManager()?.endCurrentEditing();
     await saveHandler?.({ manual: true });
   };
+}
+
+/** 「名前を付けて保存」のボタン（pdf.js の保存のボタン）を押したとき．app が決める（なければ pdf.js の元の動き）． */
+let saveAsHandler = null;
+
+/** ボタンの説明を決める（pdf.js の訳で書き換えられたら戻す）． */
+function keepTitle(b, title) {
+  if (!b) return;
+  // pdf.js は言語ファイルを読み終えてから説明を付ける（英語以外では起動の後になる）ので，訳の対象から外し，
+  // それでも書き換えられたら戻す
+  b.removeAttribute("data-l10n-id");
+  b.dataset.tnTitle = title;
+  b.setAttribute("aria-label", title);
+  const apply = () => {
+    if (b.title !== b.dataset.tnTitle) b.title = b.dataset.tnTitle;
+  };
+  apply();
+  if (!b.__tnTitleObserver) {
+    b.__tnTitleObserver = new MutationObserver(apply);
+    b.__tnTitleObserver.observe(b, { attributes: true, attributeFilter: ["title"] });
+  }
+}
+
+/**
+ * 保存のボタンを 2 つにする．pdf.js の保存のボタン（downloadButton）は「名前を付けて保存」に，
+ * その左に「上書き保存」（元の PDF に保存．Ctrl+S）のボタンを足す．
+ */
+function installSaveButtons({ saveTitle, saveAsTitle }) {
+  const download = document.getElementById("downloadButton");
+  if (!download) return;
+  let save = document.getElementById("transnoteSaveButton");
+  if (!save) {
+    save = document.createElement("button");
+    save.id = "transnoteSaveButton";
+    save.className = "toolbarButton";
+    save.type = "button";
+    save.tabIndex = 0;
+    save.append(document.createElement("span"));
+    save.addEventListener("click", () => app().downloadOrSave());
+    download.before(save);
+    // 狭いウインドウの「>>」のメニューにも上書き保存を足す
+    const secondary = document.getElementById("secondaryDownload");
+    if (secondary) {
+      const s2 = document.createElement("button");
+      s2.id = "transnoteSecondarySave";
+      s2.className = "toolbarButton labeled";
+      s2.type = "button";
+      s2.tabIndex = 0;
+      s2.append(document.createElement("span"));
+      s2.addEventListener("click", () => {
+        app().secondaryToolbar?.close();
+        app().downloadOrSave();
+      });
+      secondary.before(s2);
+    }
+    // pdf.js の保存のボタンを押したら，pdf.js の処理（"download" → 上書き保存）の代わりに「名前を付けて保存」
+    window.addEventListener(
+      "click",
+      (e) => {
+        const hit = e.target?.closest?.("#downloadButton, #secondaryDownload");
+        if (!hit) return;
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        if (hit.id === "secondaryDownload") app().secondaryToolbar?.close();
+        uiManager()?.endCurrentEditing();
+        if (saveAsHandler) saveAsHandler();
+        else pdfjsDownload?.();
+      },
+      true,
+    );
+  }
+  keepTitle(save, saveTitle);
+  save.querySelector("span").textContent = saveTitle;
+  keepTitle(download, saveAsTitle);
+  const s2 = document.getElementById("transnoteSecondarySave");
+  const secondary = document.getElementById("secondaryDownload");
+  if (s2) {
+    keepTitle(s2, saveTitle);
+    s2.querySelector("span").textContent = saveTitle;
+  }
+  if (secondary) {
+    keepTitle(secondary, saveAsTitle);
+    const label = secondary.querySelector("span");
+    label?.removeAttribute("data-l10n-id");
+    if (label) label.textContent = saveAsTitle;
+  }
 }
 
 function bindDrop() {
@@ -1366,6 +1620,14 @@ function installSidebarView(a) {
   };
   // 選択肢を押したとき（メニューは pdf.js がクリックで閉じる）
   button.addEventListener("click", () => vm.switchView(ANNOTATIONS_VIEW, true));
+  // 既定のビューは Annotations．pdf.js が文書を開いたときに戻すビューがない（パネルを閉じていた，初めて開く）ときは，
+  // パネルを閉じたまま，開いたときに出るビューを Annotations にする（PDF の PageMode や覚えたビューがあれば pdf.js のまま）
+  const setInitialView = vm.setInitialView.bind(vm);
+  vm.setInitialView = (view, ...rest) => {
+    if (!(view > 0) && !vm.isInitialViewSet) vm.active = ANNOTATIONS_VIEW;
+    return setInitialView(view, ...rest);
+  };
+  vm.active = ANNOTATIONS_VIEW;
   a.eventBus.on("sidebarviewchanged", () => setTimeout(updateSidebarVisibility, 0));
 }
 
@@ -1425,6 +1687,10 @@ function bindLayout(a) {
   };
   document.getElementById("viewerContainer").addEventListener("scroll", onScroll, { passive: true });
   window.addEventListener("resize", onScroll);
+  // ページを描き終えたら，図の矩形を集める
+  a.eventBus.on("pagerendered", (e) => {
+    if (currentDoc() && e?.pageNumber) collectFigures(e.pageNumber - 1);
+  });
   // 描かれていなかったページが描かれたら，書けなかったコメントをもう一度書く
   a.eventBus.on("annotationeditorlayerrendered", () => {
     for (const [ed, text] of pendingComments) {
@@ -1449,6 +1715,7 @@ document.addEventListener(
     hookOpenFile(a);
     patchEditorClasses(); // 注釈の層が作られる前に（registerEditorTypes を受け取るため）
     a.initializedPromise.then(() => {
+      gateEditorModes(a);
       hookSave(a);
       hookRendering(a);
       bindDrop();
@@ -1523,6 +1790,8 @@ export const bridge = {
   },
   /** 本文の間から除くもの（{skipFurniture, furnitureBand, skipCaptions, skipSmallText, sizeTolerance}）． */
   setSelectionFilter,
+  /** ツールバーに出す編集のボタン（{comment, highlight, freetext, ink, stamp}）． */
+  setEditorTools,
   scrollTo: (target) => {
     const r = rectOf(target);
     if (r) document.getElementById("viewerContainer").scrollBy({ top: r.top - bridge.viewRect().top - 120 });
@@ -1560,20 +1829,10 @@ export const bridge = {
   setOpenHandler: (fn) => (openHandler = fn),
   setDropHandler: (fn) => (dropHandler = fn),
   addToolbarButton,
-  setSaveButtonTitle: (title) => {
-    const b = document.getElementById("downloadButton");
-    if (!b) return;
-    // pdf.js は言語ファイルを読み終えてから説明を付ける（英語以外では起動の後になる）ので，訳の対象から外し，
-    // それでも書き換えられたら戻す
-    b.removeAttribute("data-l10n-id");
-    b.dataset.tnTitle = title;
-    const apply = () => {
-      if (b.title !== b.dataset.tnTitle) b.title = b.dataset.tnTitle;
-    };
-    apply();
-    if (!b.__tnTitleObserver) {
-      b.__tnTitleObserver = new MutationObserver(apply);
-      b.__tnTitleObserver.observe(b, { attributes: true, attributeFilter: ["title"] });
-    }
-  },
+  /** 保存のボタン（上書き保存と，名前を付けて保存）の説明． */
+  installSaveButtons,
+  /** 「名前を付けて保存」を押したときの処理（なければ pdf.js の元のダウンロード）． */
+  setSaveAsHandler: (fn) => (saveAsHandler = fn),
+  /** pdf.js の元の保存（注釈を入れた PDF のダウンロード）． */
+  downloadCopy: () => pdfjsDownload?.(),
 };

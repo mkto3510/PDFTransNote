@@ -46,8 +46,8 @@
 
 /* ---- pdf.js の要素に当てる見た目 ---- */
 
-/* 保存していない変更があるときは，ツールバーの保存ボタンに印を付ける */
-.transnoteDirty #downloadButton::after {
+/* 保存していない変更があるときは，ツールバーの上書き保存のボタンに印を付ける */
+.transnoteDirty #transnoteSaveButton::after {
   content: "";
   position: absolute;
   inset-block-start: 4px;
@@ -57,7 +57,7 @@
   border-radius: 50%;
   background-color: #e22850;
 }
-.transnoteSaving #downloadButton {
+.transnoteSaving #transnoteSaveButton {
   opacity: 0.5;
 }
 
@@ -129,6 +129,18 @@
   height: 9px;
   width: 9px;
   border-radius: 50%;
+}
+
+/* 上書き保存のボタン（フロッピーディスクの形）．名前を付けて保存は pdf.js の保存のボタンのまま */
+#transnoteSaveButton::before,
+#transnoteSecondarySave::before {
+  -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M2.5 1.5h9l3 3v9a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1v-11a1 1 0 0 1 1-1z' fill='none' stroke='black' stroke-width='1.3'/%3E%3Crect x='4.5' y='2' width='6' height='3.5' fill='black'/%3E%3Crect x='4' y='9' width='8' height='4.8' rx='0.6' fill='none' stroke='black' stroke-width='1.3'/%3E%3C/svg%3E");
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M2.5 1.5h9l3 3v9a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1v-11a1 1 0 0 1 1-1z' fill='none' stroke='black' stroke-width='1.3'/%3E%3Crect x='4.5' y='2' width='6' height='3.5' fill='black'/%3E%3Crect x='4' y='9' width='8' height='4.8' rx='0.6' fill='none' stroke='black' stroke-width='1.3'/%3E%3C/svg%3E");
+}
+
+/* 設定で隠した編集のボタン（bridge.js の setEditorTools）．pdf.js が hidden を付け外しするので，クラスで隠す */
+.tnToolOff {
+  display: none !important;
 }
 
 /* ツールバーの設定ボタン（toolbarButton の ::before にアイコンを入れる） */
