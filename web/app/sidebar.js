@@ -244,6 +244,7 @@ export class AnnotationSidebar {
   select(target) {
     const key = target ? this.ctx.bridge.keyOf(target) : null;
     this.selectedKey = key;
+    this.ctx.bridge.markSelected(target ?? null); // ページの上のハイライトにも点線の枠を付ける
     for (const [k, c] of this.cards) c.card.classList.toggle("selected", k === key);
     if (key) this.cards.get(key)?.card.scrollIntoView({ block: "nearest" });
   }

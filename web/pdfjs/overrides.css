@@ -71,6 +71,16 @@
   outline-offset: 1px;
   animation: tnPulse 1.2s ease-in-out infinite;
 }
+
+/* 選んだカードのハイライトの印（点線の枠．明滅しない．翻訳中の印と重なっても見分けられるよう外側に置く．bridge.js の markSelected） */
+.pdfViewer .page .tnSelectedMark {
+  position: absolute;
+  z-index: 3;
+  box-sizing: border-box;
+  pointer-events: none;
+  outline: 2px dashed var(--tn-accent);
+  outline-offset: 4px;
+}
 @keyframes tnPulse {
   50% {
     outline-color: transparent;

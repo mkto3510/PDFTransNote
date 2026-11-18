@@ -5,6 +5,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import fs from "node:fs";
 import { analyzeDocument } from "../web/pdfjs/page-structure.mjs";
+import { graphicsFromOperatorList } from "../web/pdfjs/page-graphics.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const dist = path.join(root, "vendor", "pdfjs-6.5.438-dist");
@@ -55,7 +56,9 @@ const pages = [];
 for (let i = 1; i <= doc.numPages; i++) {
   const page = await doc.getPage(i);
   const tc = await page.getTextContent({ includeMarkedContent: true, disableNormalization: true });
-  pages.push({ view: page.view, rotate: page.rotate, items: tc.items, styles: tc.styles });
+  // 図（画像）と箱（塗った・囲んだ矩形）：アプリと同じく，描画の命令から集める
+  const g = graphicsFromOperatorList(await page.getOperatorList(), page.getViewport({ scale: 1 }), pdfjs.OPS);
+  pages.push({ view: page.view, rotate: page.rotate, items: tc.items, styles: tc.styles, ...g });
 }
 
 const t0 = performance.now();

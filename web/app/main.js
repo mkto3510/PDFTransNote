@@ -30,6 +30,9 @@ const FALLBACK = {
   sizeTolerance: 6,
   skipMarginNotes: true,
   skipRuby: true,
+  skipLineNumbers: true,
+  skipCode: true,
+  skipEquations: true,
   popupWidth: 0,
   popupHeight: 0,
   uiLang: "en",
@@ -59,6 +62,9 @@ function applySettings(s) {
     sizeTolerance: s.sizeTolerance,
     skipMarginNotes: s.skipMarginNotes,
     skipRuby: s.skipRuby,
+    skipLineNumbers: s.skipLineNumbers,
+    skipCode: s.skipCode,
+    skipEquations: s.skipEquations,
   });
   bridge.setEditorTools?.(s.editorTools ?? {});
   popup?.refresh();

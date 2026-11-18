@@ -15,6 +15,7 @@
 
 import { blendOpacity, compareHighlights, textInQuads } from "./highlight-math.mjs";
 import { analyzeDocument, DEFAULT_OPTIONS as STRUCTURE_DEFAULTS, filterSelection, keepHyphens } from "./page-structure.mjs";
+import { graphicsFromOperatorList } from "./page-graphics.mjs";
 
 const HOOK_LABEL = "transnote";
 /** 一度に選べるページの数（長いと，pdf.js が途中のページの層を捨てることがある）． */
@@ -85,7 +86,7 @@ let scanned = []; // pageIndex → 読み終えたページの文字（分析に
 let analysis = null; // 本文とそれ以外の分類（page-structure.mjs の analyzeDocument の値）
 let analysisDirty = true;
 const textCache = new Map(); // 注釈の ID → 範囲の文字
-const figureCache = new Map(); // pageIndex → ページの図（画像）の矩形（表示の座標，0〜1）
+const figureCache = new Map(); // pageIndex → ページの図（画像）と箱（塗った・囲んだ矩形）と罫線の矩形 {figures, boxes, rules, drawings}（表示の座標，0〜1）
 
 /** 今の文書．文書が変わっていたら，覚えを捨てて，新しい文書の注釈の置き場を見張る． */
 function currentDoc() {
@@ -976,28 +977,62 @@ function toClientRects(pageIndex, boxes) {
 /** 翻訳中の印（ハイライトの上の点線の枠）を付け外す．ページをまたぐまとまりは，すべての部分に付ける． */
 function markBusy(target, on) {
   if (!target) return;
-  const ed = target.kind === "editor" ? target.editor : resolveEditor(target);
-  const members = ed && groups.has(ed) ? groups.get(ed) : null; // 消えた部分の印も外せるよう，生死を問わない
-  if (!members) return markBusyOne(target, on);
-  for (const m of members) markBusyOne({ kind: "editor", editor: m }, on && editorAlive(m));
+  const key = markKey(target);
+  if (on) busyTargets.set(key, target);
+  else busyTargets.delete(key);
+  markGroup(target, "tnBusyMark", on);
 }
 
-/** 翻訳中の印を 1 件分付け外す．ページの中に置くので，倍率が変わっても位置が合う． */
-function markBusyOne(target, on) {
-  const key = target.kind === "editor" ? target.editor.id : `a-${target.id}`;
-  for (const old of document.querySelectorAll(`.tnBusyMark[data-key="${CSS.escape(key)}"]`)) old.remove();
+/** 選んだカードのハイライトの印（点線の枠）を付け替える．null で外す．翻訳中の印とは別の枠で，明滅しない． */
+function markSelected(target) {
+  for (const old of document.querySelectorAll(".tnSelectedMark")) old.remove();
+  selectedTarget = target ?? null;
+  if (selectedTarget) markGroup(selectedTarget, "tnSelectedMark", true);
+}
+
+/** ページが描き直されると，ページの中に置いた印は消えるので，描き終えたページの印を付け直す． */
+function redrawMarks(pageIndex) {
+  const onPage = (t) => fracBoxes(t).pageIndex === pageIndex;
+  for (const [key, t] of busyTargets) {
+    if (t.kind === "editor" && !editorAlive(t.editor)) busyTargets.delete(key);
+    else if (onPage(t)) markBusyOne(t, "tnBusyMark", true);
+  }
+  if (selectedTarget) {
+    if (selectedTarget.kind === "editor" && !editorAlive(selectedTarget.editor)) selectedTarget = null;
+    else markGroup(selectedTarget, "tnSelectedMark", true);
+  }
+}
+
+const markKey = (target) => (target.kind === "editor" ? target.editor.id : `a-${target.id}`);
+
+/** 印をまとまりのすべての部分に付け外す．消えた部分には付けない． */
+function markGroup(target, cls, on) {
+  const ed = target.kind === "editor" ? target.editor : resolveEditor(target);
+  const members = ed && groups.has(ed) ? groups.get(ed) : null; // 消えた部分の印も外せるよう，生死を問わない
+  if (!members) return markBusyOne(target, cls, on);
+  for (const m of members) markBusyOne({ kind: "editor", editor: m }, cls, on && editorAlive(m));
+}
+
+/** 印を 1 件分付け外す．ページの中に置くので，倍率が変わっても位置が合う． */
+function markBusyOne(target, cls, on) {
+  const key = markKey(target);
+  for (const old of document.querySelectorAll(`.${cls}[data-key="${CSS.escape(key)}"]`)) old.remove();
   if (!on) return;
   const { pageIndex, boxes } = fracBoxes(target);
   const div = pageDiv(pageIndex);
   if (!div) return;
   for (const b of boxes) {
     const m = document.createElement("div");
-    m.className = "tnBusyMark";
+    m.className = cls;
     m.dataset.key = key;
     Object.assign(m.style, { left: `${b.x * 100}%`, top: `${b.y * 100}%`, width: `${b.width * 100}%`, height: `${b.height * 100}%` });
     div.append(m);
   }
 }
+
+// 印を付けている対象（ページが描き直されたときに付け直す）
+const busyTargets = new Map();
+let selectedTarget = null;
 
 /** 画面の上での target の位置（client 座標）．見えない（描かれていない）ときは null． */
 function rectOf(target) {
@@ -1094,7 +1129,7 @@ function pageContent(pageIndex) {
           .then(async (page) => {
             const tc = await page.getTextContent({ includeMarkedContent: true, disableNormalization: true });
             const content = { view: page.view, rotate: page.rotate, items: tc.items, styles: tc.styles };
-            if (figureCache.has(pageIndex)) content.figures = figureCache.get(pageIndex);
+            if (figureCache.has(pageIndex)) Object.assign(content, figureCache.get(pageIndex));
             if (d === doc) {
               scanned[pageIndex] = content;
               analysisDirty = true;
@@ -1122,53 +1157,10 @@ async function scanDocument(d) {
 }
 
 // ---------------------------------------------------------------------------
-// 図の位置：pdf.js がページを描いたときの描画の命令（operatorList）から，画像の矩形を集める．
-// 選んだ文字が画像の上にあれば，図の中の文字とする（page-structure.mjs の figures）．
-// 線画は使わない（枠で囲んだ本文なども拾ってしまうため）．ページ全体を覆う画像（スキャン）は page-structure.mjs が外す．
+// 図と箱の位置：pdf.js がページを描いたときの描画の命令（operatorList）から，画像の矩形（figures），塗った矩形・線で
+// 囲んだ矩形（boxes），細い横線（rules）を集める（page-graphics.mjs）．選んだ文字が画像の上にあれば図の中の文字，
+// 箱の中の行の並びがコードの形ならアルゴリズム・コードの箱とする（page-structure.mjs）．
 // operatorList は pdf.js の内部の値（PDFPageProxy._intentStates）なので，pdf.js を更新したら確かめること．
-
-/** 描画の命令をたどり，画像の矩形を表示の座標（0〜1）で返す． */
-function figuresFromOperatorList(opList, viewport) {
-  const O = lib().OPS;
-  const IMAGE_OPS = new Set([O.paintImageXObject, O.paintInlineImageXObject, O.paintImageMaskXObject, O.paintImageXObjectRepeat]);
-  const mul = (A, B) => [
-    A[0] * B[0] + A[2] * B[1],
-    A[1] * B[0] + A[3] * B[1],
-    A[0] * B[2] + A[2] * B[3],
-    A[1] * B[2] + A[3] * B[3],
-    A[0] * B[4] + A[2] * B[5] + A[4],
-    A[1] * B[4] + A[3] * B[5] + A[5],
-  ];
-  let ctm = [1, 0, 0, 1, 0, 0];
-  const stack = [];
-  const out = [];
-  const { fnArray, argsArray } = opList;
-  for (let i = 0; i < fnArray.length; i++) {
-    const fn = fnArray[i];
-    const args = argsArray[i];
-    if (fn === O.save) stack.push(ctm);
-    else if (fn === O.restore) ctm = stack.pop() ?? ctm;
-    else if (fn === O.transform) ctm = mul(ctm, args);
-    else if (fn === O.paintFormXObjectBegin) {
-      stack.push(ctm);
-      if (Array.isArray(args?.[0]) && args[0].length === 6) ctm = mul(ctm, args[0]);
-    } else if (fn === O.paintFormXObjectEnd) ctm = stack.pop() ?? ctm;
-    else if (IMAGE_OPS.has(fn)) {
-      const pts = [
-        [0, 0],
-        [1, 0],
-        [0, 1],
-        [1, 1],
-      ].map(([x, y]) => viewport.convertToViewportPoint(ctm[0] * x + ctm[2] * y + ctm[4], ctm[1] * x + ctm[3] * y + ctm[5]));
-      const xs = pts.map((p) => p[0] / viewport.width);
-      const ys = pts.map((p) => p[1] / viewport.height);
-      const r = { left: Math.min(...xs), right: Math.max(...xs), top: Math.min(...ys), bottom: Math.max(...ys) };
-      // 小さな画像（記号・飾り）は数えない
-      if ((r.right - r.left) * (r.bottom - r.top) >= 0.01) out.push(r);
-    }
-  }
-  return out;
-}
 
 /** ページを描き終えたら，その描画の命令から図の矩形を取り出して覚える． */
 function collectFigures(pageIndex) {
@@ -1180,11 +1172,11 @@ function collectFigures(pageIndex) {
     const ol = st?.operatorList;
     if (!ol?.lastChunk || !ol.fnArray?.length) continue;
     try {
-      const figures = figuresFromOperatorList(ol, page.getViewport({ scale: 1 }));
-      figureCache.set(pageIndex, figures);
+      const g = graphicsFromOperatorList(ol, page.getViewport({ scale: 1 }), lib().OPS);
+      figureCache.set(pageIndex, g);
       if (scanned[pageIndex]) {
-        scanned[pageIndex].figures = figures;
-        if (figures.length) analysisDirty = true;
+        Object.assign(scanned[pageIndex], g);
+        if (g.figures.length || g.boxes.length || g.rules.length || g.drawings.length) analysisDirty = true;
       }
     } catch (e) {
       console.warn("[transnote] figures", pageIndex, e);
@@ -1690,6 +1682,7 @@ function bindLayout(a) {
   // ページを描き終えたら，図の矩形を集める
   a.eventBus.on("pagerendered", (e) => {
     if (currentDoc() && e?.pageNumber) collectFigures(e.pageNumber - 1);
+    if (e?.pageNumber) redrawMarks(e.pageNumber - 1);
   });
   // 描かれていなかったページが描かれたら，書けなかったコメントをもう一度書く
   a.eventBus.on("annotationeditorlayerrendered", () => {
@@ -1770,6 +1763,7 @@ export const bridge = {
   remove,
   sourceText,
   markBusy,
+  markSelected,
   keyOf,
   listHighlights,
   /** 2 つの target が同じハイライトを指すか． */
@@ -1788,7 +1782,7 @@ export const bridge = {
     const eb = b && resolveEditor(b);
     return !!(ea && eb && groups.get(ea)?.includes(eb));
   },
-  /** 本文の間から除くもの（{skipFurniture, furnitureBand, skipCaptions, skipSmallText, sizeTolerance}）． */
+  /** 本文の間から除くもの（{skipFurniture, furnitureBand, skipCaptions, skipSmallText, sizeTolerance, skipMarginNotes, skipRuby, skipLineNumbers, skipCode, skipEquations}）． */
   setSelectionFilter,
   /** ツールバーに出す編集のボタン（{comment, highlight, freetext, ink, stamp}）． */
   setEditorTools,

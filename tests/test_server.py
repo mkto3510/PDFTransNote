@@ -479,10 +479,10 @@ class SettingsTest(unittest.TestCase):
 
     def test_selection_and_editor_tool_options(self):
         d = settings.defaults()
-        self.assertEqual((d["skipMarginNotes"], d["skipRuby"]), (True, True))
+        self.assertEqual((d["skipMarginNotes"], d["skipRuby"], d["skipLineNumbers"], d["skipCode"], d["skipEquations"]), (True, True, True, True, True))
         self.assertEqual(d["editorTools"], {"comment": True, "highlight": True, "freetext": True, "ink": True, "stamp": True})
-        v = settings.validate({"skipMarginNotes": False, "skipRuby": "false", "editorTools": {"ink": False, "stamp": "0", "unknown": False}})
-        self.assertEqual((v["skipMarginNotes"], v["skipRuby"]), (False, False))
+        v = settings.validate({"skipMarginNotes": False, "skipRuby": "false", "skipLineNumbers": False, "skipCode": "0", "skipEquations": "off", "editorTools": {"ink": False, "stamp": "0", "unknown": False}})
+        self.assertEqual((v["skipMarginNotes"], v["skipRuby"], v["skipLineNumbers"], v["skipCode"], v["skipEquations"]), (False, False, False, False, False))
         self.assertEqual(v["editorTools"], {"comment": True, "highlight": True, "freetext": True, "ink": False, "stamp": False})
         with self.assertRaises(settings.SettingsError):
             settings.validate({"editorTools": ["ink"]})
