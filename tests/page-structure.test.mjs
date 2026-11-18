@@ -15,6 +15,7 @@ import {
 const STYLES = {
   F1: { ascent: 0.8, descent: -0.2, vertical: false, fontFamily: "sans-serif" },
   V1: { ascent: 0.8, descent: -0.2, vertical: true, fontFamily: "serif" },
+  M1: { ascent: 0.8, descent: -0.2, vertical: false, fontFamily: "monospace" },
 };
 const t = (str, x, y, fs = 10, extra = {}) => ({
   str,
@@ -48,6 +49,9 @@ test("DEFAULT_OPTIONS", () => {
     sizeTolerance: 6,
     skipMarginNotes: true,
     skipRuby: true,
+    skipLineNumbers: true,
+    skipCode: true,
+    skipEquations: true,
   });
 });
 
@@ -353,6 +357,8 @@ const CLASS_OF = {
   table: "auxiliary",
   note: "auxiliary",
   ruby: "auxiliary",
+  lineNumber: "auxiliary",
+  code: "auxiliary",
 };
 /** ページごとの kinds（span の順）から，analyzeDocument の結果に似たものを作る．lines は span ごとの行の番号． */
 const mock = (...pagesSpec) => ({
@@ -658,4 +664,259 @@ test("まとめられた下付き文字：直前が幅の広い数式の文字 1
   ]);
   const r = analyzeDocument([pg]);
   assert.deepEqual(kindOf(r, 0, pg, tail), ["body", null]);
+});
+
+// --- 行番号 ---
+/** 本文の各行の直後に番号を描く（査読用原稿のように，本文の行と番号が交互に並ぶ） */
+const numbered = (n, { x = 72, y = 680, pitch = 12, num = (i) => String(i + 1), numX = 58, every = 1 } = {}) =>
+  Array.from({ length: n }, (_, i) => {
+    const yy = y - i * pitch;
+    const out = [t(LOREM + (i ? " " + i : ""), x, yy)];
+    if ((i + 1) % every === 0) out.push(t(num(i), numX, yy, 5));
+    return out;
+  }).flat();
+
+test("行番号：左の余白の 1 ずつ増える整数は lineNumber．本文は 1 つの段落のまま，行の item に番号は入らない", () => {
+  const pg = page(numbered(10));
+  const r = analyzeDocument([pg]);
+  for (let i = 1; i <= 10; i++) assert.deepEqual(kindOf(r, 0, pg, String(i)), ["auxiliary", "lineNumber"], String(i));
+  assert.deepEqual(kindOf(r, 0, pg, LOREM), ["body", null]);
+  const pa = r.pages[0];
+  // 本文は 1 つの段落（1 行ずつに割れない）．番号は本文の段落に入らず，別の補助の段落になる
+  const bodyBlocks = pa.blocks.filter((b) => b.class === "body");
+  assert.equal(bodyBlocks.length, 1);
+  assert.equal(bodyBlocks[0].lines.length, 10);
+  const num = spanOf(pg, "1");
+  for (const li of bodyBlocks[0].lines) assert.ok(!pa.lines[li].items.includes(num));
+  assert.ok(pa.blocks.filter((b) => b.class !== "body").every((b) => b.kind === "lineNumber"));
+});
+
+test("行番号：5 行ごとの番号（5, 10, 15, 20）も lineNumber", () => {
+  const pg = page(numbered(20, { every: 5, num: (i) => String(i + 1) }));
+  const r = analyzeDocument([pg]);
+  for (const s of ["5", "10", "15", "20"]) assert.deepEqual(kindOf(r, 0, pg, s), ["auxiliary", "lineNumber"], s);
+  assert.deepEqual(kindOf(r, 0, pg, LOREM), ["body", null]);
+});
+
+test("行番号でないもの：本文の左端にそろう年の列を持つ表，「1.」「2.」の箇条書き", () => {
+  const years = Array.from({ length: 10 }, (_, i) => 1990 + i);
+  const tbl = years.flatMap((yr, i) => [t(String(yr), 72, 600 - i * 12), t("Observed value of the mean", 110, 600 - i * 12), t("12.5", 260, 600 - i * 12)]);
+  const pg = page([...para(8, { y: 700 }), ...tbl, ...para(8, { y: 440 })]);
+  const r = analyzeDocument([pg]);
+  assert.notEqual(r.pages[0].kinds[spanOf(pg, "1995")], "lineNumber");
+  assert.notEqual(r.pages[0].kinds[spanOf(pg, "1990")], "lineNumber");
+  const list = Array.from({ length: 6 }, (_, i) => t(`${i + 1}.`, 58, 600 - i * 12, 10));
+  const pg2 = page([...para(8, { y: 700 }), ...list.flatMap((n, i) => [n, t(LOREM, 72, 600 - i * 12)]), ...para(8, { y: 480 })]);
+  const r2 = analyzeDocument([pg2]);
+  assert.ok(r2.pages[0].kinds.every((k) => k !== "lineNumber"));
+});
+
+const PAGE_WORDS = [
+  "seismic waves travel faster through cold rock",
+  "an estimator is unbiased when errors average out",
+  "the boundary layer thickens downstream of the edge",
+  "heat flows from the mantle toward the surface",
+  "gradient descent converges for convex objectives",
+  "each sample was measured three times in the lab",
+];
+test("行番号：複数ページで下の帯に入る本文の行は，番号と同じ高さでも本文（柱にしない）", () => {
+  const doc = Array.from({ length: 6 }, (_, p) => {
+    const items = [];
+    for (let i = 0; i < 50; i++) {
+      const y = 740 - i * 13;
+      items.push(t(LOREM + ` ${i}`, 72, y), t(String(i + 1), 58, y, 5));
+    }
+    items.push(t(PAGE_WORDS[p], 72, 90), t("51", 58, 90, 5));
+    return page(items);
+  });
+  const r = analyzeDocument(doc);
+  for (let i = 0; i < 6; i++) {
+    assert.deepEqual(kindOf(r, i, doc[i], PAGE_WORDS[i]), ["body", null], `page ${i}`);
+    assert.deepEqual(kindOf(r, i, doc[i], "51"), ["auxiliary", "lineNumber"], `page ${i}`);
+  }
+});
+
+// --- コード・アルゴリズムの箱 ---
+const mono = (str, x, y) => t(str, x, y, 10, { fontName: "M1" });
+const RAGGED = [
+  [80, "for i in range(n):"],
+  [92, "total += x[i]"],
+  [104, "if total > limit: break"],
+  [92, "y"],
+  [80, "return total"],
+];
+
+test("コード：等幅の 3 行以上，右端がそろわず字下げが 3 段以上なら code（本文に戻らない）", () => {
+  const code = RAGGED.map(([x, s], i) => mono(s, x, 580 - i * 12));
+  const pg = page([...para(8, { y: 700 }), ...code, ...para(8, { y: 480 })]);
+  const r = analyzeDocument([pg]);
+  for (const [, s] of RAGGED) assert.deepEqual(kindOf(r, 0, pg, s), ["auxiliary", "code"], s);
+  assert.deepEqual(kindOf(r, 0, pg, LOREM), ["body", null]);
+});
+
+test("コード：箱（塗った矩形）の中の，右端がそろわず（右端の近くまで届く行が少なく）字下げが 2 段以上の行は code．両端のそろう本文は本文のまま", () => {
+  const lines = [[80, "for each sample in the data set do"], [92, "compute the gradient"], [104, "update the weights"], [92, "end for"], [80, "return the weights"]];
+  // 上の段落は y = 700〜616，箱は y = 610〜540，下の段落は y = 520〜436
+  const box = { left: 60 / 612, top: (792 - 610) / 792, right: 560 / 612, bottom: (792 - 540) / 792, fill: true };
+  const pg = page([...para(8, { y: 700 }), ...lines.map(([x, s], i) => t(s, x, 600 - i * 12)), ...para(8, { y: 520 })], { boxes: [box] });
+  const r = analyzeDocument([pg]);
+  for (const [, s] of lines) assert.deepEqual(kindOf(r, 0, pg, s), ["auxiliary", "code"], s);
+  // 箱の中の，両端のそろう本文
+  const prose = Array.from({ length: 5 }, (_, i) => t(LOREM, 72, 600 - i * 12));
+  const pg2 = page([...para(8, { y: 700 }), ...prose, ...para(8, { y: 520 })], { boxes: [box] });
+  const r2 = analyzeDocument([pg2]);
+  assert.ok(r2.pages[0].kinds.every((k) => k !== "code"));
+});
+
+test("コード：「Algorithm 1: …」の次の，右端のそろわない 3 段の字下げの段落は code（等幅でなくても）", () => {
+  const body = RAGGED.map(([x, s], i) => t(s, x, 580 - i * 12));
+  const pg = page([...para(8, { y: 700 }), t("Algorithm 1: Gradient descent", 72, 600), ...body, ...para(8, { y: 480 })]);
+  const r = analyzeDocument([pg]);
+  for (const [, s] of RAGGED) assert.deepEqual(kindOf(r, 0, pg, s)[1], "code", s);
+  assert.deepEqual(kindOf(r, 0, pg, LOREM), ["body", null]);
+});
+
+// --- 式番号の読み違い ---
+test("endsWithEquationNumber：「∆w(1)」「f(2)」は式番号でない．「x (3.4)」「rcpch. (3)」「関数(2.55)」は式番号", () => {
+  for (const s of ["∆w(1)", "f(2)"]) assert.ok(!endsWithEquationNumber(s), s);
+  for (const s of ["x (3.4)", "rcpch. (3)", "関数(2.55)"]) assert.ok(endsWithEquationNumber(s), s);
+});
+
+test("小さい字（6 pt）の孤立した「∆w(1)」は式番号の行と読まず small", () => {
+  const pg = page([...para(10, { y: 700 }), t("∆w(1)", 300, 570, 6), ...para(10, { y: 540 })]);
+  const r = analyzeDocument([pg]);
+  assert.equal(kindOf(r, 0, pg, "∆w(1)")[0], "auxiliary");
+  assert.equal(kindOf(r, 0, pg, "∆w(1)")[1], "small");
+});
+
+// --- 行番号・コードの絞り込み ---
+test("filterSelection：行番号は選択の端でも途中でも落とす", () => {
+  const a = mock({ kinds: ["lineNumber", null, "lineNumber", null, "lineNumber"] });
+  const r = filterSelection([0, 1, 2, 3, 4].map((k) => piece(0, k, `s${k}`)), a);
+  assert.deepEqual(r.keep, [false, true, false, true, false]);
+  assert.ok(r.removed.some((x) => x.kind === "lineNumber"));
+  assert.deepEqual(filterSelection([piece(0, 0, "1"), piece(0, 1, "text")], a).keep, [false, true]);
+  assert.deepEqual(filterSelection([piece(0, 1, "text"), piece(0, 2, "3")], a).keep, [true, false]);
+});
+
+test("filterSelection：本文…コード…本文はコードを落とす．コードだけの選択は残す．設定で外せる", () => {
+  const a = mock({ kinds: [null, "code", "code", null] });
+  const four = [0, 1, 2, 3].map((k) => piece(0, k, `s${k}`));
+  const r = filterSelection(four, a);
+  assert.deepEqual(r.keep, [true, false, false, true]);
+  assert.equal(r.removed[0].kind, "code");
+  assert.deepEqual(filterSelection([piece(0, 1, "c1"), piece(0, 2, "c2")], a).keep, [true, true]);
+  assert.deepEqual(filterSelection(four, a, { skipCode: false }).keep, [true, true, true, true]);
+  const b = mock({ kinds: [null, "lineNumber", null] });
+  const three = [0, 1, 2].map((k) => piece(0, k, `s${k}`));
+  assert.deepEqual(filterSelection(three, b).keep, [true, false, true]);
+  assert.deepEqual(filterSelection(three, b, { skipLineNumbers: false }).keep, [true, true, true]);
+});
+
+test("filterSelection：選択のはみ出し．初めの行より上にある末尾の切れ端（後から描かれた数式）は order で落とす", () => {
+  // 5 行の段落（y=680..632）と，最後に描かれ，段落の上（y=720）にある数式の行
+  const pg = page([...para(5, { y: 680, text: "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron" }), t("E = m c squared and so on and on", 72, 720)]);
+  const r = analyzeDocument([pg]);
+  const spans = pg.items.map((it, k) => ({ k, str: it.str }));
+  const pieces = spans.slice(1).map((s) => piece(0, s.k, s.str)); // 段落の 2 行目から末尾まで
+  const out = filterSelection(pieces, r);
+  const eq = pieces.length - 1;
+  assert.equal(out.keep[eq], false);
+  assert.ok(out.keep.slice(0, eq).every(Boolean));
+  assert.ok(out.removed.some((x) => x.kind === "order" && x.text.includes("E = m c")));
+  assert.ok(!out.order.includes(eq));
+});
+
+// --- 別行立ての式・フォント違いのコード・行番号（段の間）・脚注の線・線画の図・キャプションの続き ---
+test("式：段の中ほどの「x = a + b」と右端の別 item「(3)」は equation（補助）", () => {
+  const pg = page([...para(8, { y: 700 }), t("x = a + b", 280, 590), t("(3)", 547, 590), ...para(8, { y: 560 })]);
+  const r = analyzeDocument([pg]);
+  assert.deepEqual(kindOf(r, 0, pg, "x = a + b"), ["auxiliary", "equation"]);
+  assert.deepEqual(kindOf(r, 0, pg, LOREM), ["body", null]);
+});
+
+test("式：番号のない中央の「y = f(x) + g(x)」は，上下に余白があれば equation", () => {
+  const pg = page([...para(8, { y: 700 }), t("y = f(x) + g(x)", 255, 590), ...para(8, { y: 560 })]);
+  const r = analyzeDocument([pg]);
+  assert.deepEqual(kindOf(r, 0, pg, "y = f(x) + g(x)"), ["auxiliary", "equation"]);
+  assert.deepEqual(kindOf(r, 0, pg, LOREM), ["body", null]);
+});
+
+test("式でないもの：中央の短い見出し「Results and discussion」，中央に 1 つだけの数字「42」", () => {
+  const pg = page([...para(8, { y: 700 }), t("Results and discussion", 230, 590), ...para(8, { y: 560 })]);
+  const r = analyzeDocument([pg]);
+  assert.notEqual(kindOf(r, 0, pg, "Results and discussion")[1], "equation");
+  const pg2 = page([...para(8, { y: 700 }), t("42", 300, 590), ...para(8, { y: 560 })]);
+  const r2 = analyzeDocument([pg2]);
+  assert.ok(r2.pages[0].kinds.every((k) => k !== "equation"));
+});
+
+test("filterSelection：式は既定で落とし，skipEquations: false なら残す", () => {
+  const a = mock({ kinds: [null, "equation", null] });
+  const three = [0, 1, 2].map((k) => piece(0, k, `s${k}`));
+  assert.deepEqual(filterSelection(three, a).keep, [true, false, true]);
+  assert.deepEqual(filterSelection(three, a, { skipEquations: false }).keep, [true, true, true]);
+});
+
+test("コード（ラベルなし）：右端がそろわず字下げ 3 段以上の 4 行以上の塊が，本文と違うフォントなら code", () => {
+  const styles = { ...STYLES, F2: { ascent: 0.8, descent: -0.2, vertical: false, fontFamily: "sans-serif" } };
+  const f2 = (str, x, y) => t(str, x, y, 10, { fontName: "F2" });
+  const code = RAGGED.map(([x, s], i) => f2(s, x, 580 - i * 12));
+  const pg = page([...para(8, { y: 700 }), ...code, ...para(8, { y: 480 })], { styles });
+  const r = analyzeDocument([pg]);
+  for (const [, s] of RAGGED) assert.deepEqual(kindOf(r, 0, pg, s), ["auxiliary", "code"], s);
+  assert.deepEqual(kindOf(r, 0, pg, LOREM), ["body", null]);
+});
+
+test("コード：「Algorithm 2 Training loop」（記号なし）の次の字下げの行は，1 行目が caption，残りが code", () => {
+  const body = RAGGED.map(([x, s], i) => t(s, x, 566 - i * 12));
+  const pg = page([...para(8, { y: 700 }), t("Algorithm 2 Training loop", 72, 586), ...body, ...para(8, { y: 480 })]);
+  const r = analyzeDocument([pg]);
+  assert.deepEqual(kindOf(r, 0, pg, "Algorithm 2 Training loop"), ["auxiliary", "caption"]);
+  for (const [, s] of RAGGED) assert.equal(kindOf(r, 0, pg, s)[1], "code", s);
+  assert.deepEqual(kindOf(r, 0, pg, LOREM), ["body", null]);
+});
+
+test("行番号：二段組の段の間（x≈306）の 1, 2, 3, … は lineNumber．両段の本文は本文のまま", () => {
+  const COL = "the quick brown fox jumps over the lazy dog and the model reads each line"; // 36 pt * ... ≈ 72..290
+  const left = Array.from({ length: 10 }, (_, i) => t(COL.slice(0, 43), 72, 700 - i * 12));
+  const right = Array.from({ length: 10 }, (_, i) => t(COL.slice(0, 43), 322, 700 - i * 12));
+  const nums = Array.from({ length: 10 }, (_, i) => t(String(i + 1), 303, 700 - i * 12, 7));
+  const pg = page([...left, ...right, ...nums]);
+  const r = analyzeDocument([pg]);
+  for (let i = 1; i <= 10; i++) assert.deepEqual(kindOf(r, 0, pg, String(i)), ["auxiliary", "lineNumber"], String(i));
+  assert.deepEqual(kindOf(r, 0, pg, COL.slice(0, 43)), ["body", null]);
+});
+
+test("脚注の線：下の短い罫線の下にある小さい段落は note", () => {
+  const FN = "this footnote explains the data source in a little more detail for readers";
+  const rule = { left: 72 / 612, top: (792 - 150) / 792, right: 172 / 612, bottom: (792 - 149.5) / 792 };
+  const pg = page([...para(10, { y: 700 }), ...para(2, { y: 135, fs: 8, pitch: 10, text: FN })], { rules: [rule] });
+  const r = analyzeDocument([pg]);
+  assert.deepEqual(kindOf(r, 0, pg, FN), ["auxiliary", "note"]);
+  assert.deepEqual(kindOf(r, 0, pg, LOREM), ["body", null]);
+});
+
+test("線画の図：描画の領域の中の短い文字（軸の名前）は figure．領域の外の本文は本文．本文の長い行を 2 行以上含む領域は図にしない", () => {
+  const dr = { left: 150 / 612, top: (792 - 560) / 792, right: 450 / 612, bottom: (792 - 400) / 792, n: 20, rules: 2, boxes: 1 };
+  const pg = page([...para(8, { y: 700 }), t("Velocity", 270, 500), t("Depth (km)", 160, 450), ...para(8, { y: 380 })], { drawings: [dr] });
+  const r = analyzeDocument([pg]);
+  assert.deepEqual(kindOf(r, 0, pg, "Velocity"), ["auxiliary", "figure"]);
+  assert.deepEqual(kindOf(r, 0, pg, "Depth (km)"), ["auxiliary", "figure"]);
+  assert.deepEqual(kindOf(r, 0, pg, LOREM), ["body", null]);
+  // 本文の行が領域に入る（行の背景の色など）
+  const dr2 = { left: 60 / 612, top: (792 - 690) / 792, right: 560 / 612, bottom: (792 - 620) / 792, n: 20, rules: 2, boxes: 1 };
+  const pg2 = page([...para(12, { y: 680 })], { drawings: [dr2] });
+  const r2 = analyzeDocument([pg2]);
+  assert.ok(r2.pages[0].kinds.every((k) => k !== "figure"));
+});
+
+test("キャプションの続き：文で終わるキャプション（3 行）の後の，左端のそろう字下げのない段落は本文", () => {
+  const CAP = ["Figure 3. Distribution of the measured velocity across all of the sampled stations in the", "survey area during the second field season, shown with the fitted trend line and", "the associated error bars."];
+  const caps = CAP.map((s, i) => t(s, 72, 600 - i * 12));
+  const bodyAfter = para(6, { y: 600 - 2 * 12 - 17, text: "the next paragraph starts here and continues across the whole column width of text" });
+  const pg = page([...para(8, { y: 700 }), ...caps, ...bodyAfter]);
+  const r = analyzeDocument([pg]);
+  for (const s of CAP) assert.deepEqual(kindOf(r, 0, pg, s), ["auxiliary", "caption"], s);
+  assert.deepEqual(kindOf(r, 0, pg, bodyAfter[0].str), ["body", null]);
 });

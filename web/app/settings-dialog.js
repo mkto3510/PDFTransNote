@@ -70,6 +70,9 @@ export class SettingsDialog {
     f.sizeTolerance = el("input", { id: "tnSizeTolerance", type: "number", min: "2", max: "30", step: "1" });
     f.skipMarginNotes = el("input", { id: "tnSkipMarginNotes", type: "checkbox" });
     f.skipRuby = el("input", { id: "tnSkipRuby", type: "checkbox" });
+    f.skipLineNumbers = el("input", { id: "tnSkipLineNumbers", type: "checkbox" });
+    f.skipCode = el("input", { id: "tnSkipCode", type: "checkbox" });
+    f.skipEquations = el("input", { id: "tnSkipEquations", type: "checkbox" });
     // ツールバーに出す編集のボタン
     f.tools = Object.fromEntries(TOOLS.map((k) => [k, el("input", { id: `tnTool-${k}`, type: "checkbox" })]));
     f.error = el("div", { class: "tnStatus error", role: "alert" });
@@ -141,6 +144,9 @@ export class SettingsDialog {
           row(t("settings.sizeTolerance"), f.sizeTolerance, t("settings.sizeToleranceHelp")),
           el("div", { class: "tnRow" }, el("span"), el("label", { class: "tnCheck" }, f.skipMarginNotes, t("settings.skipMarginNotes"))),
           el("div", { class: "tnRow" }, el("span"), el("label", { class: "tnCheck" }, f.skipRuby, t("settings.skipRuby"))),
+          el("div", { class: "tnRow" }, el("span"), el("label", { class: "tnCheck" }, f.skipLineNumbers, t("settings.skipLineNumbers"))),
+          el("div", { class: "tnRow" }, el("span"), el("label", { class: "tnCheck" }, f.skipCode, t("settings.skipCode"))),
+          el("div", { class: "tnRow" }, el("span"), el("label", { class: "tnCheck" }, f.skipEquations, t("settings.skipEquations"))),
         ),
         f.error,
         el(
@@ -190,6 +196,9 @@ export class SettingsDialog {
     f.sizeTolerance.value = this.draft.sizeTolerance;
     f.skipMarginNotes.checked = !!this.draft.skipMarginNotes;
     f.skipRuby.checked = !!this.draft.skipRuby;
+    f.skipLineNumbers.checked = !!this.draft.skipLineNumbers;
+    f.skipCode.checked = !!this.draft.skipCode;
+    f.skipEquations.checked = !!this.draft.skipEquations;
     for (const k of TOOLS) f.tools[k].checked = this.draft.editorTools?.[k] !== false;
     f.error.textContent = "";
     const idx = Math.max(0, this.draft.services.findIndex((s) => s.id === this.draft.activeService));
@@ -295,6 +304,9 @@ export class SettingsDialog {
       sizeTolerance: f.sizeTolerance.value,
       skipMarginNotes: f.skipMarginNotes.checked,
       skipRuby: f.skipRuby.checked,
+      skipLineNumbers: f.skipLineNumbers.checked,
+      skipCode: f.skipCode.checked,
+      skipEquations: f.skipEquations.checked,
       editorTools: Object.fromEntries(TOOLS.map((k) => [k, f.tools[k].checked])),
     });
     f.error.textContent = "";
