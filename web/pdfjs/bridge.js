@@ -149,6 +149,7 @@ function loadPageHighlights(pageIndex, pdfPage = null) {
           color: toHex(a.color) ?? "#ffd400",
           opacity: typeof a.opacity === "number" ? a.opacity : 1,
           comment: a.contentsObj?.str ?? "",
+          popupRef: a.popupRef,
         }));
     } catch (e) {
       console.warn("[transnote] getAnnotations failed", pageIndex, e);
@@ -893,7 +894,7 @@ function resolveEditor(target) {
 /**
  * target の編集用の部品に対して fn を行う．ファイルにあった注釈は，ハイライト用のモードにすると
  * pdf.js が編集用の部品に変えるので，そうしてから行い，通常のモードに戻す（変更した部品は残る）．
- * ページが描かれていないときは，描かれるまで待つ（ページは動かさない）．
+ * ページが描かれていないときは，そのページへ移動してから編集する．
  */
 async function withEditor(target, fn) {
   const d = currentDoc();
@@ -1000,19 +1001,45 @@ async function setColor(target, color) {
 }
 
 async function remove(target) {
-  if (!isAlive(target)) return false;
-  return changed(
-    !!(await withEditor(target, (ed) => {
-      const parts = groupOf(ed);
-      for (const part of parts) {
-        markBusyOne({ kind: "editor", editor: part }, "tnBusyMark", false);
-        pendingComments.delete(part);
-        part.remove();
-        drawFileHighlights(part.pageIndex);
-      }
-      return parts.length > 0 && parts.every((part) => !editorAlive(part));
-    })),
-  );
+  const d = currentDoc();
+  const um = uiManager();
+  if (!d || !um) return false;
+  const id = target.kind === "annotation" ? target.id : target.editor?.annotationElementId;
+  const pageIndex = target.kind === "annotation" ? target.pageIndex : target.editor?.pageIndex;
+  const ed = target.kind === "annotation" ? editorForAnnotation(id, pageIndex) : target.editor;
+
+  if (id) {
+    if (um.isDeletedAnnotationElement(id) || !/^[1-9]\d*R(?:[1-9]\d*)?$/.test(id)) return false;
+    const element = annotationElement(pageIndex, id);
+    const file = fileData(pageIndex, id);
+    if (!file && !element && !editorAlive(ed)) return false;
+
+    if (editorAlive(ed)) {
+      pendingComments.delete(ed);
+      markBusyOne({ kind: "editor", editor: ed }, "tnBusyMark", false);
+      ed.remove();
+    }
+    // Send the same deletion record as a PDF.js editor. A stored highlight can be
+    // deleted even when its page has no editor layer or that layer is switching modes.
+    if (!um.isDeletedAnnotationElement(id)) {
+      um.addDeletedAnnotationElement({ annotationElementId: id, id: null });
+      d.annotationStorage.setValue(um.getId(), { id, pageIndex, deleted: true, popupRef: element?.data.popupRef ?? file?.popupRef });
+    }
+    element?.updateEdited({ deleted: true });
+    markBusyOne({ kind: "annotation", id, pageIndex }, "tnBusyMark", false);
+    drawFileHighlights(pageIndex);
+    return changed(true);
+  }
+
+  if (!editorAlive(ed)) return false;
+  const parts = groupOf(ed);
+  for (const part of parts) {
+    markBusyOne({ kind: "editor", editor: part }, "tnBusyMark", false);
+    pendingComments.delete(part);
+    part.remove();
+    drawFileHighlights(part.pageIndex);
+  }
+  return changed(parts.length > 0 && parts.every((part) => !editorAlive(part)));
 }
 
 /**
