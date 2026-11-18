@@ -59,6 +59,8 @@ function union(rects) {
 
 const pageDiv = (pageIndex) => document.querySelector(`#viewer .page[data-page-number="${pageIndex + 1}"]`);
 const textLayerOf = (pageIndex) => pageDiv(pageIndex)?.querySelector(".textLayer") ?? null;
+const fileHighlightElements = (pageIndex) =>
+  pageDiv(pageIndex)?.querySelectorAll(".annotationLayer .highlightAnnotation[data-annotation-id]") ?? [];
 const pageIndexOf = (node) => {
   const page = (node?.nodeType === Node.TEXT_NODE ? node.parentElement : node)?.closest?.(".page");
   return page ? Number(page.dataset.pageNumber) - 1 : -1;
@@ -267,7 +269,7 @@ function drawFileHighlights(pageIndex) {
   const um = uiManager();
   const replaced = new Set();
   for (const ed of um?.getEditors(pageIndex) ?? []) if (ed.annotationElementId) replaced.add(ed.annotationElementId);
-  const list = (fileHl.get(pageIndex) ?? []).filter((h) => !replaced.has(h.id) && !um?.isDeletedAnnotationElement?.(h.id));
+  const list = (fileHl.get(pageIndex) ?? []).filter((h) => !replaced.has(h.id) && !isFileHighlightDeleted(um, h.id));
   if (!list.length) {
     layer?.remove();
     return;
@@ -874,12 +876,13 @@ async function createHighlight(anchor, color) {
 // ---------------------------------------------------------------------------
 
 const editorAlive = (ed) => !!ed && uiManager()?.getEditor(ed.id) === ed;
+const isFileHighlightDeleted = (um, id) => !!id && !!um?.isDeletedAnnotationElement(id);
 
 /** ファイルにあった注釈が，すでに編集用の部品に変わっていれば，その部品． */
 function editorForAnnotation(id, pageIndex) {
   const um = uiManager();
-  if (!um) return null;
-  for (const ed of um.getEditors(pageIndex)) if (ed.annotationElementId === id) return ed;
+  if (!um || isFileHighlightDeleted(um, id)) return null;
+  for (const ed of um.getEditors(pageIndex)) if (ed.annotationElementId === id && !ed.deleted) return ed;
   return null;
 }
 
@@ -922,9 +925,13 @@ async function withEditor(target, fn) {
 
 function isAlive(target) {
   if (!target) return false;
-  if (target.kind === "editor") return editorAlive(target.editor);
   const um = uiManager();
-  if (um?.isDeletedAnnotationElement?.(target.id)) return false;
+  if (target.kind === "editor") {
+    const { editor } = target;
+    return !!editor && um?.getEditor(editor.id) === editor && !editor.deleted &&
+      !isFileHighlightDeleted(um, editor.annotationElementId);
+  }
+  if (isFileHighlightDeleted(um, target.id)) return false;
   return (
     !!annotationElement(target.pageIndex, target.id) ||
     !!editorForAnnotation(target.id, target.pageIndex) ||
@@ -1016,7 +1023,6 @@ async function remove(target) {
 
     if (editorAlive(ed)) {
       pendingComments.delete(ed);
-      markBusyOne({ kind: "editor", editor: ed }, "tnBusyMark", false);
       ed.remove();
     }
     // Send the same deletion record as a PDF.js editor. A stored highlight can be
@@ -1026,7 +1032,8 @@ async function remove(target) {
       d.annotationStorage.setValue(um.getId(), { id, pageIndex, deleted: true, popupRef: element?.data.popupRef ?? file?.popupRef });
     }
     element?.updateEdited({ deleted: true });
-    markBusyOne({ kind: "annotation", id, pageIndex }, "tnBusyMark", false);
+    element?.hide();
+    clearHighlightMarks({ kind: "annotation", id, pageIndex });
     drawFileHighlights(pageIndex);
     return changed(true);
   }
@@ -1034,9 +1041,9 @@ async function remove(target) {
   if (!editorAlive(ed)) return false;
   const parts = groupOf(ed);
   for (const part of parts) {
-    markBusyOne({ kind: "editor", editor: part }, "tnBusyMark", false);
     pendingComments.delete(part);
     part.remove();
+    clearHighlightMarks({ kind: "editor", editor: part });
     drawFileHighlights(part.pageIndex);
   }
   return changed(parts.length > 0 && parts.every((part) => !editorAlive(part)));
@@ -1077,6 +1084,7 @@ function toClientRects(pageIndex, boxes) {
 function markBusy(target, on) {
   if (!target) return;
   const key = markKey(target);
+  on = on && isAlive(target);
   if (on) busyTargets.set(key, target);
   else busyTargets.delete(key);
   markGroup(target, "tnBusyMark", on);
@@ -1085,7 +1093,7 @@ function markBusy(target, on) {
 /** 選んだカードのハイライトの印（点線の枠）を付け替える．null で外す．翻訳中の印とは別の枠で，明滅しない． */
 function markSelected(target) {
   for (const old of document.querySelectorAll(".tnSelectedMark")) old.remove();
-  selectedTarget = target ?? null;
+  selectedTarget = isAlive(target) ? target : null;
   if (selectedTarget) markGroup(selectedTarget, "tnSelectedMark", true);
 }
 
@@ -1093,8 +1101,10 @@ function markSelected(target) {
 function redrawMarks(pageIndex) {
   const onPage = (t) => fracBoxes(t).pageIndex === pageIndex;
   for (const [key, t] of busyTargets) {
-    if (t.kind === "editor" && !editorAlive(t.editor)) busyTargets.delete(key);
-    else {
+    if (!isAlive(t)) {
+      busyTargets.delete(key);
+      markGroup(t, "tnBusyMark", false);
+    } else {
       const ed = t.kind === "editor" ? t.editor : resolveEditor(t);
       const members = ed && groups.get(ed);
       const targets = members ? members.filter(editorAlive).map((editor) => ({ kind: "editor", editor })) : [t];
@@ -1102,12 +1112,22 @@ function redrawMarks(pageIndex) {
     }
   }
   if (selectedTarget) {
-    if (selectedTarget.kind === "editor" && !editorAlive(selectedTarget.editor)) selectedTarget = null;
+    if (!isAlive(selectedTarget)) markSelected(null);
     else markGroup(selectedTarget, "tnSelectedMark", true);
   }
 }
 
-const markKey = (target) => (target.kind === "editor" ? target.editor.id : `a-${target.id}`);
+const markKey = (target) => {
+  const id = target.kind === "editor" ? target.editor.annotationElementId : target.id;
+  return id ? `a-${id}` : target.editor.id;
+};
+
+function clearHighlightMarks(target) {
+  busyTargets.delete(markKey(target));
+  markBusyOne(target, "tnBusyMark", false);
+  markBusyOne(target, "tnSelectedMark", false);
+  if (selectedTarget && !isAlive(selectedTarget)) markSelected(null);
+}
 
 /** 印をまとまりのすべての部分に付け外す．消えた部分には付けない． */
 function markGroup(target, cls, on) {
@@ -1121,7 +1141,7 @@ function markGroup(target, cls, on) {
 function markBusyOne(target, cls, on) {
   const key = markKey(target);
   for (const old of document.querySelectorAll(`.${cls}[data-key="${CSS.escape(key)}"]`)) old.remove();
-  if (!on) return;
+  if (!on || !isAlive(target)) return;
   const { pageIndex, boxes } = fracBoxes(target);
   const div = pageDiv(pageIndex);
   if (!div) return;
@@ -1434,7 +1454,7 @@ async function listHighlights() {
     const replaced = new Set(eds.map((ed) => ed.annotationElementId).filter(Boolean));
     for (const ed of eds) out.push(describe({ kind: "editor", editor: ed }));
     for (const h of fileHl.get(p) ?? []) {
-      if (replaced.has(h.id) || um?.isDeletedAnnotationElement?.(h.id)) continue;
+      if (replaced.has(h.id) || isFileHighlightDeleted(um, h.id)) continue;
       out.push(describe({ kind: "annotation", id: h.id, pageIndex: p }));
     }
   }
@@ -1452,13 +1472,15 @@ function highlightAt(x, y, pageIndex) {
   for (const ed of um.getEditors(pageIndex)) {
     if (ed.editorType !== "highlight" || ed.isEmpty?.()) continue;
     const target = { kind: "editor", editor: ed };
+    if (!isAlive(target)) continue;
     if (toClientRects(pageIndex, fracBoxes(target).boxes).some((r) => inside(r, x, y, 1))) return target;
   }
-  for (const s of pageDiv(pageIndex)?.querySelectorAll(".annotationLayer .highlightAnnotation[data-annotation-id]") ?? []) {
-    if (s.hidden || s.closest("[hidden]")) continue;
+  for (const s of fileHighlightElements(pageIndex)) {
+    const id = s.dataset.annotationId;
+    if (s.hidden || s.closest("[hidden]") || isFileHighlightDeleted(um, id)) continue;
     if (inside(s.getBoundingClientRect(), x, y)) {
-      const id = s.dataset.annotationId;
-      return editorForAnnotation(id, pageIndex) ? { kind: "editor", editor: editorForAnnotation(id, pageIndex) } : { kind: "annotation", id, pageIndex };
+      const editor = editorForAnnotation(id, pageIndex);
+      return editor ? { kind: "editor", editor } : { kind: "annotation", id, pageIndex };
     }
   }
   return null;
@@ -1824,6 +1846,14 @@ function bindHighlights(a) {
     highlightsChanged();
   });
   bus.on("editorsrendered", (e) => drawFileHighlights(e.pageNumber - 1));
+  bus.on("annotationlayerrendered", ({ pageNumber }) => {
+    const pageIndex = pageNumber - 1;
+    const um = uiManager();
+    for (const element of fileHighlightElements(pageIndex)) {
+      const id = element.dataset.annotationId;
+      if (isFileHighlightDeleted(um, id)) annotationElement(pageIndex, id)?.hide();
+    }
+  });
   bus.on("annotationeditorstateschanged", highlightsChanged);
   bus.on("documentloaded", () => {
     const d = currentDoc();
