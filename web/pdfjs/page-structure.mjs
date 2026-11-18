@@ -135,7 +135,8 @@ const prepCache = new WeakMap();
 export function preparePage(page, knownColumns = null) {
   let cache = prepCache.get(page);
   const viewKey = page.view?.join(",");
-  if (!cache || cache.items !== page.items || cache.styles !== page.styles ||
+  if (!cache || (page.normalized && cache.normalized !== page.normalized) ||
+      cache.items !== page.items || cache.styles !== page.styles ||
       cache.rotate !== page.rotate || cache.viewKey !== viewKey) {
     const normalized = page.normalized ?? normalizePageText(page);
     cache = {

@@ -131,6 +131,7 @@ function currentDoc() {
 function loadPageHighlights(pageIndex, pdfPage = null) {
   const d = currentDoc();
   if (!d) return Promise.resolve([]);
+  if (fileHl.has(pageIndex)) return Promise.resolve(fileHl.get(pageIndex));
   let p = fileHlLoading.get(pageIndex);
   if (p) return p;
   p = (async () => {
@@ -159,7 +160,9 @@ function loadPageHighlights(pageIndex, pdfPage = null) {
       fileHlVersion++;
     }
     return list;
-  })();
+  })().finally(() => {
+    if (p === fileHlLoading.get(pageIndex)) fileHlLoading.delete(pageIndex);
+  });
   fileHlLoading.set(pageIndex, p);
   return p;
 }
@@ -1797,9 +1800,11 @@ function bindHighlights(a) {
   bus.on("annotationeditorstateschanged", highlightsChanged);
   bus.on("documentloaded", () => {
     const d = currentDoc();
-    if (d) scanDocument(d); // 本文とそれ以外を見分けるため，裏でページの文字を読む
-    loadAllHighlights().then(() => {
-      drawAllFileHighlights();
+    if (!d) return;
+    scanDocument(d);
+    // The render hook loads annotations for displayed pages. Scan the rest only when their list is opened.
+    loadPageHighlights(Math.max(0, (app().page || 1) - 1)).then(() => {
+      if (d !== currentDoc()) return;
       highlightsChanged();
     });
   });
