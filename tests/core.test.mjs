@@ -39,6 +39,13 @@ test("cleanSource：行末ハイフンの結合，合字，改行", () => {
   assert.equal(cleanSource(null), "");
 });
 
+test("cleanSource：日本語の前後の改行は空白にしない（段落の空行は残す）", () => {
+  assert.equal(cleanSource("中\n心極限定理と，\n「距\n離」"), "中心極限定理と，「距離」");
+  assert.equal(cleanSource("ここでは，t\nは粒子の数"), "ここでは，tは粒子の数");
+  assert.equal(cleanSource("一つ目の段落．\n\n二つ目の段落"), "一つ目の段落．\n\n二つ目の段落");
+  assert.equal(cleanSource("English\ntext"), "English text");
+});
+
 test("fillTemplate：既知の差し込み文字だけ置き換える", () => {
   assert.equal(
     fillTemplate("${langFrom}->${langTo}: ${sourceText} ${unknown}", { sourceText: "hi", langFrom: "en", langTo: "ja" }),

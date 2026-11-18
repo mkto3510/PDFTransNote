@@ -5,6 +5,8 @@
   2. GET  /doc/<文書トークン>/<ファイル名>：開いた PDF を渡す（Range 要求に対応）．
   3. PUT  /doc/<文書トークン>/<ファイル名>：注釈を入れた PDF を元の場所に保存する．
      初めて上書きする前に data/backups に複製し，一時ファイルを経由して置き換える．
+  3b. PUT /save-as/<行き先トークン>：「名前を付けて保存」．行き先はウインドウ側のファイルのダイアログで選んだものだけ
+     （Api.save_as_dialog が DocRegistry.register_target で登録する．1 回だけ使える）．
   4. GET/PUT /api/settings：設定の読み書き．
   5. /llm/…：設定に登録した翻訳サービスへの中継（応答は少しずつそのまま返す）．
      POST /llm/chat?service=<id>   chat/completions（サービスのエンドポイントにだけ送り，API キーを付ける）
@@ -92,7 +94,31 @@ class DocRegistry:
 
     def __init__(self) -> None:
         self._docs: dict[str, Doc] = {}
+        self._targets: dict[str, Path] = {}  # 「名前を付けて保存」の行き先（1 回だけ使える）
         self._lock = threading.Lock()
+
+    def register_target(self, path: str | os.PathLike) -> str:
+        """「名前を付けて保存」で選ばれた行き先を登録し，1 回だけ使えるトークンを返す．
+
+        行き先はウインドウ側（Api.save_as_dialog）がファイルのダイアログで選んだものだけ．画面からは登録できない．
+        """
+        p = Path(path).resolve()
+        token = secrets.token_urlsafe(24)
+        with self._lock:
+            self._targets[token] = p
+        return token
+
+    def take_target(self, token: str) -> Path | None:
+        with self._lock:
+            return self._targets.pop(token, None)
+
+    def doc_at(self, path: Path) -> Doc | None:
+        """そのパスで開いている文書（なければ None）．"""
+        with self._lock:
+            for d in self._docs.values():
+                if d.path == path:
+                    return d
+        return None
 
     def register(self, path: str | os.PathLike) -> Doc:
         p = Path(path).resolve()
@@ -257,6 +283,9 @@ class Handler(BaseHTTPRequestHandler):
                 if method == "PUT":
                     self._check_token()
                     return self._save_doc(doc)
+            if path.startswith("/save-as/") and method == "PUT":
+                self._check_token()
+                return self._save_as(path[len("/save-as/") :].split("/", 1)[0])
             if path == "/api/settings":
                 self._check_token()
                 if method == "GET":
@@ -405,6 +434,24 @@ class Handler(BaseHTTPRequestHandler):
             backup = save_pdf(doc, body, self.server.backups_dir, force=force, keep=keep)
         self._json(200, {"ok": True, "size": len(body), "backup": str(backup) if backup else None})
 
+    def _save_as(self, token: str) -> None:
+        """「名前を付けて保存」：Api.save_as_dialog が登録した行き先に書く（行き先は 1 回だけ使える）．"""
+        body = self._read_body(MAX_PDF_BYTES)
+        target = self.server.registry.take_target(token)
+        if target is None:
+            raise HttpError(404, "unknown document")
+        if not body.startswith(b"%PDF-"):
+            raise HttpError(400, "Not a PDF")
+        same = self.server.registry.doc_at(target)
+        if same is not None:
+            # 開いている PDF そのものを選んだ：上書き保存と同じく，バックアップを取ってから書く
+            keep = self.server.read_settings().get("backupCount", settings_mod.DEFAULTS["backupCount"])
+            with same.lock:
+                save_pdf(same, body, self.server.backups_dir, force=True, keep=keep)
+        else:
+            write_atomic(target, body)
+        self._json(200, {"ok": True, "size": len(body), "name": target.name, "original": same is not None})
+
     # --- 設定 ---
     def _settings_get(self) -> None:
         self._json(
@@ -500,6 +547,26 @@ def _prune_backups(folder: Path, keep: int) -> None:
             pass
 
 
+def write_atomic(path: Path, data: bytes) -> None:
+    """同じフォルダの一時ファイルに書いてから置き換える．置き換えられない（使用中）ときは 423．"""
+    tmp = path.with_name(f".{path.name}.transnote-tmp")
+    try:
+        with tmp.open("wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        try:
+            os.replace(tmp, path)
+        except PermissionError as e:
+            raise HttpError(423, "Cannot save because the file is in use by another app", reason="locked") from e
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
+
 def save_pdf(doc: Doc, data: bytes, backups_dir: Path, *, force: bool = False, keep: int = 5) -> Path | None:
     """data を doc.path に保存する．
 
@@ -530,22 +597,7 @@ def save_pdf(doc: Doc, data: bytes, backups_dir: Path, *, force: bool = False, k
         doc.backed_up = True
         _prune_backups(backups_dir, keep)
 
-    tmp = path.with_name(f".{path.name}.transnote-tmp")
-    try:
-        with tmp.open("wb") as f:
-            f.write(data)
-            f.flush()
-            os.fsync(f.fileno())
-        try:
-            os.replace(tmp, path)
-        except PermissionError as e:
-            raise HttpError(423, "Cannot save because the file is in use by another app", reason="locked") from e
-    finally:
-        if tmp.exists():
-            try:
-                tmp.unlink()
-            except OSError:
-                pass
+    write_atomic(path, data)
     st = path.stat()
     doc.mtime_ns, doc.size = st.st_mtime_ns, st.st_size
     return backup

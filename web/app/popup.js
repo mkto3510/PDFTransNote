@@ -184,7 +184,7 @@ export class Popup {
   makeSkipped() {
     const removed = this.anchor?.removed;
     if (!removed?.length || !this.anchor.raw) return null;
-    const kind = (k) => (["furniture", "caption", "small"].includes(k) ? t(`popup.kind.${k}`) : k);
+    const kind = (k) => (["furniture", "caption", "small", "margin", "ruby", "order"].includes(k) ? t(`popup.kind.${k}`) : k);
     const list = removed.map((r) => t("popup.skippedItem", { kind: kind(r.kind), n: r.pageIndex + 1 })).join(t("popup.skippedSep"));
     const link = el("button", { class: "tnLink", type: "button", title: t("popup.includeTitle"), onclick: () => this.onInclude() }, t("popup.include"));
     return el("div", { class: "tnSkipped" }, `${t("popup.skipped")} ${list} `, link);

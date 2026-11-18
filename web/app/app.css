@@ -570,6 +570,10 @@
   display: flex;
   gap: 6px;
 }
+.tnToolList {
+  flex-wrap: wrap;
+  column-gap: 16px;
+}
 .tnTestResult {
   color: var(--tn-fg-weak);
 

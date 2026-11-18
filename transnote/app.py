@@ -170,6 +170,30 @@ class Api:
         self._app.open_paths(files, reuse=self if not self._has_doc else None)
         return len(files)
 
+    def save_as_dialog(self, doc_token: str) -> str | None:
+        """「名前を付けて保存」のダイアログを出す．選んだ行き先をサーバーに登録し，書き込み用のトークンを返す．
+
+        行き先は開いている PDF と同じフォルダ・同じ名前から始める．取り消したら None．
+        """
+        import webview
+
+        doc = self._app.server.registry.get(str(doc_token or ""))
+        lang = _ui_lang(self._app.data.settings)
+        result = self._window.create_file_dialog(
+            webview.FileDialog.SAVE,
+            directory=str(doc.path.parent) if doc else "",
+            save_filename=doc.name if doc else "document.pdf",
+            file_types=(tr(lang, "PDF files (*.pdf)"),),
+        )
+        if not result:
+            return None
+        path = result if isinstance(result, str) else result[0]
+        if not path:
+            return None
+        if not path.lower().endswith(".pdf"):
+            path += ".pdf"
+        return self._app.server.registry.register_target(path)
+
     def open_dropped(self, names: list[str]) -> int:
         """ウインドウにドロップされたファイルを開く．
 

@@ -54,6 +54,7 @@ CATALOGUE: list[tuple[str, str, str]] = [
      r"同時に送る要求の数は \g<lo> から \g<hi> までにしてください．", "Concurrent requests must be between 1 and 8"),
     (r"Invalid color: (?P<v>.*)", r"色の指定が正しくありません：\g<v>", "Invalid color: red"),
     (r"Invalid display language: (?P<v>.*)", r"表示言語の指定が正しくありません：\g<v>", "Invalid display language: fr"),
+    (r"Invalid editing buttons", "編集のボタンの指定が正しくありません．", "Invalid editing buttons"),
     (rf"(?P<name>{_NAME_RE}) must be a number", r"\g<name>は数値で指定してください．", "The popup width must be a number"),
     (rf"(?P<name>{_NAME_RE}) must be between (?P<lo>\d+) and (?P<hi>\d+)",
      r"\g<name>は \g<lo> から \g<hi> までにしてください．", "The header and footer band must be between 3 and 25"),

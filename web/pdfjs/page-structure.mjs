@@ -24,9 +24,21 @@ export const DEFAULT_OPTIONS = {
   skipCaptions: true,
   skipSmallText: true,
   sizeTolerance: 6,
+  skipMarginNotes: true,
+  skipRuby: true,
 };
 
 const DEG = 180 / Math.PI;
+/**
+ * 同じ高さの文字でも，右へこの倍数（文字の大きさに対して）より離れていれば別の行の切れ端にする（隣の段）．
+ * 左へ戻るときは SEGMENT_GAP_LEFT（行の左の余白の注）．OCR の文字は語の間が広いことがあるので，右は大きめにする．
+ */
+const SEGMENT_GAP = 3;
+const SEGMENT_GAP_LEFT = 1.5;
+/** 行の中の欄の切れ目（表の欄）とみなす間（文字の大きさに対する倍数）． */
+const CELL_GAP = 1.5;
+/** ルビとみなす大きさ（付く行の文字に対する割合）の上限． */
+const RUBY_RATIO = 0.62;
 const LOG_STEP = Math.log(1.02); // 本文の大きさは 2% 刻みで数える
 const round2 = (v) => Math.round(v * 100) / 100;
 const isBlank = (s) => !/\S/.test(s);
@@ -44,6 +56,8 @@ const CAPTION_RE = new RegExp(String.raw`^${CAPTION_LABEL}\s*(${CAPTION_NUMBER})
 // 日本の雑誌に多い「第 1 図」「第 2 表」（番号が前に来る）
 const JP_DAI_RE = /^第\s*([0-9０-９]+(?:[.．\-－‐][0-9０-９]+)*)\s*[図表](.*)$/su;
 const CAPTION_DELIM_RE = /^\s*[.:|．：—–-]/;
+// 見出しの番号だけの文字（「図 3」「Fig. 2.」「第 1 表」「Table 4:」）
+const CAPTION_LABEL_ONLY_RE = new RegExp(String.raw`^(?:${CAPTION_LABEL}\s*${CAPTION_NUMBER}|第\s*[0-9０-９]+\s*[図表])\s*[.:．：]?$`, "u");
 // 日本語の見出しの番号の後に続く助詞（本文の「図 1 に示す」「第 2 表の値」）．1 文字の助詞は，後にひらがなが続かないときだけ
 // （「図 3 つくばの…」のように，ひらがなで始まる題を本文と取り違えないため）
 const JP_PARTICLE_RE =
@@ -72,12 +86,12 @@ export function matchCaption(text) {
 
 const ROMAN = String.raw`(?=[ivxlcdm])m{0,4}(?:cm|cd|d?c{0,3})(?:xc|xl|l?x{0,3})(?:ix|iv|v?i{0,3})`;
 const PAGE_NUMBER_RE = new RegExp(
-  String.raw`^[-–—]?\s*(?:(?:page|p\.|pg\.?)\s*)?(?:\d{1,5}|${ROMAN})(?:\s*(?:of|/)\s*\d{1,5})?\s*(?:ページ|頁)?\s*[-–—]?$`,
+  String.raw`^[-–—―‐]?\s*(?:(?:page|p\.|pg\.?)\s*)?(?:\d{1,5}|${ROMAN})(?:\s*(?:of|/)\s*\d{1,5})?\s*(?:ページ|頁)?\s*[-–—―‐]?$`,
   "i",
 );
 
 /**
- * ページ番号の形か（"12"，"- 12 -"，"– 12 –"，"xii"，"Page 12"，"p. 12"，"12 of 30"，"12 / 30"，"12 ページ"）．
+ * ページ番号の形か（"12"，"- 12 -"，"– 12 –"，"― 12 ―"，"xii"，"Page 12"，"p. 12"，"12 of 30"，"12 / 30"，"12 ページ"）．
  * @param {string} text
  */
 export function isPageNumberText(text) {
@@ -85,6 +99,7 @@ export function isPageNumberText(text) {
 }
 
 const EQ_NUMBER_RE = /\(\s*[A-Za-z]?\d{1,3}(?:\.\d{1,3})*[a-z]?\s*\)\s*$/;
+const EQ_NUMBER_ONLY_RE = /^\s*\(\s*[A-Za-z]?\d{1,3}(?:\.\d{1,3})*[a-z]?\s*\)\s*$/;
 
 /** 行の終わりが式番号（"(12)"，"(3.4)"，"(2a)"）か． */
 export function endsWithEquationNumber(text) {
@@ -233,7 +248,25 @@ function buildPrep(page) {
     const fhMax = Math.max(last.fh, it.fh);
     const fhMin = Math.min(last.fh, it.fh);
     if (it.left < last.left - fhMax && Math.abs(it.base - last.base) > 0.2 * fhMin) return false;
+    // 同じ高さでも，横に大きく離れていれば別の行の切れ端（余白の注，隣の段，表の別の欄）
+    // （行の右に離して置いた式番号「(12)」は同じ行のまま）
+    const em = Math.max(fhMax, line.fh || 0);
+    if (it.right < line.left - SEGMENT_GAP_LEFT * em) return false;
+    if (it.left > line.right + SEGMENT_GAP * em && !EQ_NUMBER_ONLY_RE.test(it.str) && !captionLabelOnly(line)) return false;
     return true;
+  };
+  // 行が図表の見出しで始まる（「図3」「Fig. 2. Map showing」）なら，離れて続く文字も同じ行にする
+  // （OCR では見出しの語が離れて，順も入れ替わって置かれることがある）
+  const captionLabelOnly = (line) => {
+    const head = collapse(line.nb.slice(0, 4).map((k) => items[k].str).join(" "));
+    return CAPTION_LABEL_ONLY_RE.test(head) || matchCaption(head) !== null;
+  };
+  // ルビ：行の文字よりずっと小さく，行のすぐ上に横が重なって置かれた文字．行を切らずに，その行に付ける
+  const rubyOf = (line, it) => {
+    if (!line || line.rotated || it.rotated || !(line.fh > 0)) return false;
+    if (it.fh > RUBY_RATIO * line.fh) return false;
+    if (it.bottom > line.top + 0.35 * line.fh || it.bottom < line.top - 0.7 * line.fh) return false;
+    return it.right > line.left - line.fh && it.left < line.right + 2 * line.fh;
   };
   const grow = (line, it) => {
     if (it.left < line.left) line.left = it.left;
@@ -247,10 +280,16 @@ function buildPrep(page) {
       pending.push(k);
       continue;
     }
-    if (cur && sameLine(cur, it)) {
+    if (cur && rubyOf(cur, it)) {
+      it.ruby = true;
+      cur.items.push(...pending, k);
+      cur.ruby.push(k);
+    } else if (cur && sameLine(cur, it)) {
+      if (it.left > cur.right + CELL_GAP * Math.max(it.fh, cur.fh || 0)) cur.cells++;
       cur.items.push(...pending, k);
       cur.nb.push(k);
       grow(cur, it);
+      if (it.fh > cur.fh) cur.fh = it.fh;
     } else {
       const head = [];
       for (const w of pending) {
@@ -260,6 +299,9 @@ function buildPrep(page) {
       cur = {
         items: [...head, k],
         nb: [k],
+        ruby: [],
+        cells: 1,
+        fh: it.fh,
         left: it.left,
         right: it.right,
         top: it.top,
@@ -310,6 +352,8 @@ function buildPrep(page) {
     line.chars = chars;
     line.artifact = artifact;
     line.text = lineText(items, line.items);
+    const digits = (line.text.match(/[0-9０-９]/g) || []).length;
+    line.digitShare = chars ? digits / chars : 0;
     line.cap = matchCaption(line.text);
     outLines.push({
       top: line.top / dispH,
@@ -318,6 +362,20 @@ function buildPrep(page) {
       right: line.right / dispW,
       items: line.items,
     });
+  }
+  // 同じ高さに並ぶ行の切れ端の数（表の行は 3 つ以上の欄に分かれる）
+  for (const l of lines) l.row = 1;
+  for (let i = 0; i < lines.length; i++) {
+    const a = lines[i];
+    if (a.rotated) continue;
+    for (let j = i + 1; j < lines.length; j++) {
+      const b = lines[j];
+      if (b.rotated) continue;
+      if (Math.abs(a.base - b.base) <= 0.3 * Math.min(a.size || 1, b.size || 1)) {
+        a.row++;
+        b.row++;
+      }
+    }
   }
   return { items, lines, lineOf, outLines, dispW, dispH, rotChars, totChars, sizesUpright, sizesAll };
 }
@@ -484,36 +542,302 @@ function buildBlocks(prep, body, tol, band, pitch) {
       B.size = modeOf(B.map) || B.size;
     }
   }
-  for (const b of blocks) {
-    const ls = b.lines.map((i) => lines[i]);
-    b.text = ls.map((l) => l.text).join(" ");
-    b.chars = ls.reduce((n, l) => n + l.chars, 0);
-    b.rotated = ls.every((l) => l.rotated);
-    b.artifact = ls.every((l) => l.artifact);
-    b.band = b.lines.length <= 2 ? bandOf(b) : "";
-    b.eqNumber = ls.some((l) => endsWithEquationNumber(l.text));
-    b.lastText = ls[ls.length - 1].text;
-  }
+  for (const b of blocks) finishBlock(b, lines, bandOf);
   return blocks;
+}
+
+/** 段落の性質（文字，文字数，回転，帯など）を，行から求め直す． */
+function finishBlock(b, lines, bandOf) {
+  const ls = b.lines.map((i) => lines[i]);
+  b.left = Math.min(...ls.map((l) => l.left));
+  b.right = Math.max(...ls.map((l) => l.right));
+  b.top = Math.min(...ls.map((l) => l.top));
+  b.bottom = Math.max(...ls.map((l) => l.bottom));
+  b.map = new Map();
+  for (const l of ls) for (const [s, w] of l.map) b.map.set(s, (b.map.get(s) || 0) + w);
+  b.size = modeOf(b.map) || ls[0].size;
+  b.text = ls.map((l) => l.text).join(" ");
+  b.chars = ls.reduce((n, l) => n + l.chars, 0);
+  b.rotated = ls.every((l) => l.rotated);
+  b.artifact = ls.every((l) => l.artifact);
+  b.band = b.lines.length <= 2 ? bandOf(b) : "";
+  b.eqNumber = ls.some((l) => endsWithEquationNumber(l.text));
+  b.lastText = ls[ls.length - 1].text;
+  return b;
+}
+
+/** 柱の行と本文が一つの段落になっていたら（OCR で柱が本文に近い），柱の行を別の段落に分ける． */
+function splitFurniture(blocks, lines, marks, bandOf) {
+  const out = [];
+  for (const b of blocks) {
+    if (!b.lines.some((li) => marks.has(li)) || b.lines.every((li) => marks.has(li))) {
+      out.push(b);
+      continue;
+    }
+    let cur = null;
+    for (const li of b.lines) {
+      const f = marks.has(li);
+      if (!cur || cur.f !== f) {
+        cur = { f, lines: [] };
+        out.push(cur);
+      }
+      cur.lines.push(li);
+    }
+  }
+  return out.map((b) => (b.f === undefined ? b : finishBlock({ lines: b.lines }, lines, bandOf)));
 }
 
 // ---------------------------------------------------------------------------
 // 文書全体の見分け
 
+/** 柱を探す，前後のページの幅（このページ数の中で繰り返していれば柱）． */
+const FURNITURE_WINDOW = 8;
+/** OCR の揺れを許す，柱の文字の似かたの下限（2 文字ずつの組の Dice 係数）． */
+const FURNITURE_SIMILARITY = 0.8;
+const DOI_RE = /^(?:doi|DOI)\s*[:：]|doi\.org\//;
+const NOTE_RE = /^[*＊†‡]|〒|e-?mail|corresponding author/i;
+
+/** 空白を除き，小文字にした文字．柱の比較に使う． */
+const squeeze = (s) => String(s ?? "").replace(/\s+/g, "").toLowerCase();
+
+/** 2 文字ずつの組の集まり（Dice 係数を求めるため）． */
+function bigrams(s) {
+  const m = new Map();
+  for (let i = 0; i + 1 < s.length; i++) {
+    const g = s.slice(i, i + 2);
+    m.set(g, (m.get(g) || 0) + 1);
+  }
+  return m;
+}
+function dice(a, b) {
+  let n = 0;
+  let ta = 0;
+  let tb = 0;
+  for (const v of a.values()) ta += v;
+  for (const v of b.values()) tb += v;
+  if (!ta || !tb) return 0;
+  for (const [g, v] of a) n += Math.min(v, b.get(g) || 0);
+  return (2 * n) / (ta + tb);
+}
+
+/** 行の頭か末尾にある数（ページ番号の候補）．「210 7. GRADIENT DESCENT」「7.1 Error Surfaces 211」「― 690 ―」． */
+function folioNumbers(text) {
+  const t = collapse(text);
+  const out = [];
+  const head = /^[^\p{L}\p{N}]{0,3}(\d{1,4})(?![\d.．])/u.exec(t);
+  const tail = /(?<![\d.．])(\d{1,4})[^\p{L}\p{N}]{0,3}$/u.exec(t);
+  if (head) out.push(Number(head[1]));
+  if (tail && (!head || tail.index !== head.index)) out.push(Number(tail[1]));
+  return out;
+}
+
+/**
+ * 柱とページ番号の行を見つける．上下の帯の中の行を候補にし，次のどれかなら柱とする．
+ *   1. 近くのページ（前後 FURNITURE_WINDOW ページ）の同じ側・同じくらいの高さに，同じ文字（数字は # にする）か，
+ *      よく似た文字（OCR の揺れ）の行が，ほかに 2 ページ以上ある．章ごとに変わる柱も，偶数・奇数で違う柱も拾える．
+ *   2. 行の頭か末尾の数が，近くのページの帯の行の数とページの順に 1 ずつ（見開きを 1 ページにした PDF では 2 ずつ）並ぶ．
+ *   3. DOI の行．
+ * @returns {Set<number>[]} ページごとの，柱の行の番号
+ */
+function findFurniture(work, band) {
+  const N = work.length;
+  const cands = work.map((w) => {
+    if (!w) return [];
+    const { lines, dispH } = w.prep;
+    const out = [];
+    // 帯の中で，いちばん外側（上の帯ならいちばん上，下の帯ならいちばん下）の行の位置
+    let minTop = Infinity;
+    let maxBottom = -Infinity;
+    for (const l of lines) {
+      if (l.rotated || l.artifact || !l.chars) continue;
+      if (l.top < minTop) minTop = l.top;
+      if (l.bottom > maxBottom) maxBottom = l.bottom;
+    }
+    lines.forEach((l, li) => {
+      if (l.rotated || l.artifact || !l.chars) return;
+      const mid = (l.top + l.bottom) / 2; // 行の中ほどが帯の中（帯の境にかかる大きめの柱も拾う）
+      const side = mid <= band * dispH ? "top" : mid >= (1 - band) * dispH ? "bottom" : "";
+      if (!side) return;
+      const text = squeeze(l.text);
+      if (!text || text.length > 160) return;
+      const plain = text.replace(/\d+/g, "#");
+      const outer = side === "top" ? l.top - minTop < 0.6 * l.size : maxBottom - l.bottom < 0.6 * l.size;
+      out.push({ li, side, outer, pos: l.top / dispH, text, plain, letters: plain.replace(/[#\p{P}\p{S}]/gu, ""), grams: null, nums: folioNumbers(l.text), raw: l.text });
+    });
+    return out;
+  });
+  const marks = work.map(() => new Set());
+  for (let p = 0; p < N; p++) {
+    for (const c of cands[p]) {
+      if (DOI_RE.test(collapse(c.raw))) {
+        marks[p].add(c.li);
+        continue;
+      }
+      // 1. 近くのページで繰り返す
+      let same = 0;
+      if (c.letters.length >= 2 || c.plain.length >= 4) {
+        for (let q = Math.max(0, p - FURNITURE_WINDOW); q <= Math.min(N - 1, p + FURNITURE_WINDOW) && same < 2; q++) {
+          if (q === p) continue;
+          for (const d of cands[q]) {
+            if (d.side !== c.side || Math.abs(d.pos - c.pos) > 0.025) continue;
+            let hit = d.plain === c.plain;
+            if (!hit && c.letters.length >= 6 && d.letters.length >= 6) {
+              c.grams ??= bigrams(c.letters);
+              d.grams ??= bigrams(d.letters);
+              hit = dice(c.grams, d.grams) >= FURNITURE_SIMILARITY;
+            }
+            if (hit) {
+              same++;
+              break;
+            }
+          }
+        }
+      }
+      if (same >= 2) {
+        marks[p].add(c.li);
+        continue;
+      }
+      // 2. ページ番号が並ぶ
+      if (!c.outer || !c.nums.length || c.text.length > 80) continue;
+      let seq = 0;
+      for (let q = Math.max(0, p - 3); q <= Math.min(N - 1, p + 3) && seq < 2; q++) {
+        if (q === p) continue;
+        const want = c.nums.flatMap((n) => [n + (q - p), n + 2 * (q - p)]);
+        if (cands[q].some((d) => d.outer && d.nums.some((m) => want.includes(m)))) seq++;
+      }
+      const need = N <= 4 ? 1 : 2;
+      if (seq >= need) marks[p].add(c.li);
+    }
+  }
+  // 柱の行やページ番号と同じ高さに並ぶ帯の行も柱（「7.1. Error Surfaces    211」の見出しの部分）
+  for (let p = 0; p < N; p++) {
+    const lines = work[p]?.prep.lines;
+    if (!lines) continue;
+    const anchors = cands[p].filter((c) => marks[p].has(c.li) || isPageNumberText(c.raw));
+    for (const c of cands[p]) {
+      if (marks[p].has(c.li)) continue;
+      const l = lines[c.li];
+      // 高さが重なる（OCR では柱の文字とページ番号の基準線が少しずれる）
+      const beside = (a) => {
+        const m = lines[a.li];
+        const ov = Math.min(m.bottom, l.bottom) - Math.max(m.top, l.top);
+        return ov > 0.4 * Math.min(m.bottom - m.top, l.bottom - l.top);
+      };
+      if (anchors.some((a) => a.li !== c.li && a.side === c.side && beside(a))) marks[p].add(c.li);
+    }
+  }
+  return marks;
+}
+
+/**
+ * 本文の枠：本文の大きさの長い行の左端と右端から，偶数・奇数ページごとに，本文が置かれる横の範囲を求める．
+ * 枠の外（余白）にある行の切れ端は余白の注とする．行が少なければ null．
+ */
+function bodyFrames(work, body, tol) {
+  const frames = [null, null];
+  for (const parity of [0, 1]) {
+    const lefts = [];
+    const rights = [];
+    work.forEach((w, p) => {
+      if (!w || p % 2 !== parity) return;
+      const { lines, dispW } = w.prep;
+      for (const l of lines) {
+        if (l.rotated || l.artifact || l.chars < 25 || !near(l.size, body, tol)) continue;
+        lefts.push(l.left / dispW);
+        rights.push(l.right / dispW);
+      }
+    });
+    if (lefts.length < 20) continue;
+    lefts.sort((a, b) => a - b);
+    rights.sort((a, b) => a - b);
+    // 10 パーセンタイル：全幅の図表や章の扉の長い行に引きずられないように
+    frames[parity] = { left: lefts[Math.floor(lefts.length * 0.1)], right: rights[Math.ceil(rights.length * 0.9) - 1] };
+  }
+  return frames;
+}
+
+/**
+ * XY-cut による読み順（NDLOCR の読み順推定の考え方に倣う．コードは使っていない）．
+ * 段落の矩形の集まりを，縦か横の空白で再帰的に分け，左→右・上→下の順に並べる．
+ *   - 縦の空白（段の間）があり，両側に 2 行以上あれば，先に縦で分ける（段組み）．
+ *   - そうでなければ横の空白で分ける．このとき，幅の広い段落（段をまたぐ見出し・図）があれば，その上と下だけで分け，
+ *     なければすべての横の空白で分ける（段組みの段を，横の空白で輪切りにしないため）．
+ *   - どちらの空白もなければ，上→下，左→右．
+ * @returns {number[]} 段落の番号の読む順
+ */
+function xyOrder(rects, em) {
+  const lineCount = (ids) => ids.reduce((n, i) => n + rects[i].lines, 0);
+  const gaps = (ids, lo, hi) => {
+    const sorted = [...ids].sort((a, b) => rects[a][lo] - rects[b][lo]);
+    const out = [];
+    let reach = rects[sorted[0]][hi];
+    for (let k = 1; k < sorted.length; k++) {
+      const r = rects[sorted[k]];
+      if (r[lo] > reach) out.push({ at: k, from: reach, to: r[lo], width: r[lo] - reach, sorted });
+      if (r[hi] > reach) reach = r[hi];
+    }
+    return out;
+  };
+  const cut = (ids) => {
+    if (ids.length <= 1) return ids;
+    const vs = gaps(ids, "left", "right");
+    let best = null;
+    for (const g of vs) {
+      if (g.width < 0.5 * em) continue;
+      const a = g.sorted.slice(0, g.at);
+      const b = g.sorted.slice(g.at);
+      if (lineCount(a) < 2 || lineCount(b) < 2) continue;
+      if (!best || g.width > best.width) best = g;
+    }
+    if (best) return [...cut(best.sorted.slice(0, best.at)), ...cut(best.sorted.slice(best.at))];
+    const hs = gaps(ids, "top", "bottom");
+    if (hs.length) {
+      const sorted = hs[0].sorted;
+      const left = Math.min(...ids.map((i) => rects[i].left));
+      const right = Math.max(...ids.map((i) => rects[i].right));
+      const wide = new Set(ids.filter((i) => rects[i].right - rects[i].left > 0.6 * (right - left)));
+      let use = hs;
+      if (wide.size && wide.size < ids.length) {
+        // 幅の広い段落の直前と直後の空白だけ
+        use = hs.filter((g) => wide.has(sorted[g.at]) || wide.has(sorted[g.at - 1]));
+        if (!use.length) use = hs;
+      }
+      const out = [];
+      let start = 0;
+      for (const g of use) {
+        out.push(...cut(sorted.slice(start, g.at)));
+        start = g.at;
+      }
+      out.push(...cut(sorted.slice(start)));
+      return out;
+    }
+    if (vs.length) {
+      const g = vs.reduce((a, b) => (b.width > a.width ? b : a));
+      return [...cut(g.sorted.slice(0, g.at)), ...cut(g.sorted.slice(g.at))];
+    }
+    return [...ids].sort((a, b) => rects[a].top - rects[b].top || rects[a].left - rects[b].left);
+  };
+  return cut(rects.map((_, i) => i));
+}
+
 /**
  * 文書のすべての（読んだ）ページの文字を，body・auxiliary・excluded に分ける．ページが読まれるたびに呼び直してよい．
- * @param {({view: number[], rotate: number, items: object[], styles: object} | null)[]} pages
+ * @param {({view: number[], rotate: number, items: object[], styles: object, figures?: {left: number, top: number, right: number, bottom: number}[]} | null)[]} pages
+ *   figures は，ページの図（画像・線画）の矩形（表示の座標，0〜1）．あれば，その中の文字を図の中の文字とする．
  * @param {{furnitureBand?: number, sizeTolerance?: number}} [options] furnitureBand（%）は柱を探す上下の帯の高さ，
  *   sizeTolerance（%）は本文と同じ大きさと見なす差
- * @returns {{bodySize: number, pages: ({
+ * @returns {{bodySize: number, hyphenWords: Set<string>, pages: ({
  *   classes: ("body"|"auxiliary"|"excluded")[],
- *   kinds: (null|"artifact"|"furniture"|"pageNumber"|"caption"|"small"|"rotated")[],
+ *   kinds: (null|"artifact"|"furniture"|"pageNumber"|"caption"|"small"|"rotated"|"margin"|"figure"|"table"|"note"|"ruby")[],
+ *   order: number[],
+ *   paraStart: boolean[],
  *   lines: {top: number, bottom: number, left: number, right: number, items: number[]}[],
  *   lineOf: number[],
- *   blocks: {lines: number[], class: string, kind: string|null, size: number}[],
+ *   blocks: {lines: number[], class: string, kind: string|null, size: number, rank: number}[],
  * } | null)[]}}
- *   classes・kinds・lineOf は span の番号で引く．lines の位置は表示の座標（0〜1）．lineOf は span が入る行の番号（なければ -1）．
- *   blocks は段落（lines の番号の並び）と，その分け方．
+ *   classes・kinds・order・lineOf は span の番号で引く．order は span が入る段落の，ページの中の読む順（なければ -1）．
+ *   paraStart は行の番号で引き，段落の始まりの行（字下げ）なら true．lines の位置は表示の座標（0〜1）．
+ *   hyphenWords は，行の途中にハイフンでつないで書かれた語（小文字）．行末のハイフンを残すかを決めるのに使う．
  */
 export function analyzeDocument(pages, options = {}) {
   const list = Array.isArray(pages) ? pages : [];
@@ -525,58 +849,40 @@ export function analyzeDocument(pages, options = {}) {
   const bodySize = computeBodySize(preps);
   const body = bodySize || 10;
 
-  // 1. ページごとに段落を作り，柱の候補の鍵を集める
+  // 1. ページごとに段落を作る
   const work = preps.map((prep) => {
     if (!prep) return null;
     const pitch = pagePitch(prep, body, tol) || 1.2 * body;
     const blocks = buildBlocks(prep, body, tol, band, pitch);
-    for (const b of blocks) {
-      b.keys = [];
-      if (!b.band || b.artifact) continue;
-      const text = b.text.toLowerCase();
-      if (text.length < 8 || text.length > 160) continue;
-      b.bucket = Math.floor(b.top / prep.dispH / 0.05);
-      b.keys.push(b.band + "|" + text);
-      if (/\d/.test(text)) b.keys.push(b.band + "|#|" + text.replace(/\d+/g, "#"));
-    }
     return { prep, pitch, blocks };
   });
 
-  // 2. 柱：同じ鍵（帯の側・5% 刻みの高さ・文字）が，十分な数のページに出るか
-  const N = list.length;
-  const threshold = Math.max(3, Math.ceil(0.25 * N));
-  const seen = new Map(); // 鍵 → 高さの刻み → ページの集合
-  if (N >= 3) {
-    work.forEach((w, pageIndex) => {
-      if (!w) return;
-      for (const b of w.blocks) {
-        for (const key of b.keys) {
-          let byBucket = seen.get(key);
-          if (!byBucket) seen.set(key, (byBucket = new Map()));
-          let set = byBucket.get(b.bucket);
-          if (!set) byBucket.set(b.bucket, (set = new Set()));
-          set.add(pageIndex);
-        }
+  // 2. 柱とページ番号の行，本文の枠，行の途中のハイフンの語
+  const furnitureLines = findFurniture(work, band);
+  work.forEach((w, p) => {
+    if (!w) return;
+    const { dispH } = w.prep;
+    const bandOf = (box) => (box.bottom <= band * dispH ? "top" : box.top >= (1 - band) * dispH ? "bottom" : "");
+    w.blocks = splitFurniture(w.blocks, w.prep.lines, furnitureLines[p], bandOf);
+  });
+  const frames = bodyFrames(work, body, tol);
+  const hyphenWords = new Set();
+  for (const w of work) {
+    if (!w) continue;
+    for (const l of w.prep.lines) {
+      for (const m of l.text.matchAll(/(\p{L}+)[-‐](\p{L}+)(?=.)/gu)) {
+        if (m.index + m[0].length < l.text.length) hyphenWords.add(m[0].toLowerCase().replace("‐", "-"));
       }
-    });
-  }
-  const repeated = (b) => {
-    if (N < 3) return false;
-    for (const key of b.keys) {
-      const byBucket = seen.get(key);
-      if (!byBucket) continue;
-      const pagesSeen = new Set();
-      for (let d = -1; d <= 1; d++) for (const p of byBucket.get(b.bucket + d) || []) pagesSeen.add(p);
-      if (pagesSeen.size >= threshold) return true;
     }
-    return false;
-  };
+  }
 
   // 3. 段落ごとに分ける
-  const outPages = work.map((w) => {
+  const outPages = work.map((w, pageIndex) => {
     if (!w) return null;
     const { prep, pitch, blocks } = w;
-    const { items, lines, lineOf, dispW } = prep;
+    const { items, lines, lineOf, dispW, dispH } = prep;
+    const figures = (list[pageIndex]?.figures ?? []).filter((f) => f && (f.right - f.left) * (f.bottom - f.top) < 0.8);
+    const frame = frames[pageIndex % 2];
     const bodyRotated = prep.rotChars > 0.5 * prep.totChars; // 縦書きのように，本文そのものが回転している
     // 本文の行の幅の目安（いちばん広い行の代わりに，80 パーセンタイル．ページ全体に渡る 1 行に引きずられないように）
     const widths = lines
@@ -599,6 +905,41 @@ export function analyzeDocument(pages, options = {}) {
       const bw = b.right - b.left;
       return bw < 0.9 * cw && Math.abs((b.left + b.right) / 2 - (cl + cr) / 2) < 0.03 * dispW;
     };
+    const em = body;
+    /** 段落が本文の枠の外（余白）にあるか． */
+    const outsideFrame = (b) => {
+      if (!frame) return false;
+      const l = b.left / dispW;
+      const r = b.right / dispW;
+      const pad = em / dispW;
+      return r < frame.left - pad || l > frame.right + pad;
+    };
+    /** 段落の文字の中心が図の矩形の中にある割合． */
+    const inFigure = (b) => {
+      if (!figures.length) return 0;
+      let hit = 0;
+      let tot = 0;
+      for (const li of b.lines) {
+        for (const k of lines[li].nb) {
+          const it = items[k];
+          const cx = (it.left + it.right) / 2 / dispW;
+          const cy = (it.top + it.bottom) / 2 / dispH;
+          tot += it.chars;
+          if (figures.some((f) => cx >= f.left && cx <= f.right && cy >= f.top && cy <= f.bottom)) hit += it.chars;
+        }
+      }
+      return tot ? hit / tot : 0;
+    };
+    // 表の行：3 つ以上の欄（離れた行の切れ端か，行の中の広い間）が同じ高さに並び，数字が多い
+    const tableRows = (b) =>
+      b.lines.filter((li) => {
+        const l = lines[li];
+        return (l.cells >= 3 || (l.row >= 3 && l.chars <= 30)) && l.digitShare >= 0.3;
+      }).length;
+    const isShort = (b) => b.chars <= 30 && b.lines.length <= 6 && b.lines.every((li) => lines[li].chars <= 8) && !b.eqNumber;
+    // 短い行ばかりの小さな段落が 3 つ以上あるページでは，それらを図の中の記号や軸の数字とみなす
+    const shortCount = blocks.filter((b) => !b.artifact && !b.band && isShort(b)).length;
+    const shortBlock = (b) => shortCount >= 3 && isShort(b);
 
     let prevContent = null; // 直前の（除外でない）段落
     let prev = null; // 直前の段落
@@ -606,15 +947,19 @@ export function analyzeDocument(pages, options = {}) {
       let cls = "body";
       let kind = null;
       const firstCap = lines[b.lines[0]].cap;
+      const allFurniture = b.lines.every((li) => furnitureLines[pageIndex].has(li));
       if (b.artifact) {
         cls = "excluded";
         kind = "artifact";
       } else if (b.band && b.lines.length === 1 && isPageNumberText(b.text)) {
         cls = "excluded";
         kind = "pageNumber";
-      } else if (b.band && repeated(b)) {
+      } else if (allFurniture) {
         cls = "excluded";
         kind = "furniture";
+      } else if (inFigure(b) >= 0.5) {
+        cls = "auxiliary";
+        kind = "figure";
       } else if (
         firstCap &&
         !(prevContent && HYPHEN_END_RE.test(prevContent.lastText)) &&
@@ -628,9 +973,22 @@ export function analyzeDocument(pages, options = {}) {
       } else if (b.rotated && !bodyRotated) {
         cls = "auxiliary";
         kind = "rotated";
+      } else if (outsideFrame(b)) {
+        cls = "auxiliary";
+        kind = "margin";
+      } else if (b.lines.length >= 2 && tableRows(b) >= Math.max(2, 0.5 * b.lines.length)) {
+        cls = "auxiliary";
+        kind = "table";
+      } else if (b.top / dispH >= 0.55 && NOTE_RE.test(collapse(b.text))) {
+        cls = "auxiliary";
+        kind = "note";
       } else if (smaller(b) && !b.eqNumber && !mathFragment(b, prev, pitch)) {
         cls = "auxiliary";
         kind = "small";
+      } else if (shortBlock(b) && !(prevContent && HYPHEN_END_RE.test(prevContent.lastText))) {
+        // 短い行ばかりの小さな段落（図の中の記号や軸の数字）
+        cls = "auxiliary";
+        kind = "figure";
       }
       b.cls = cls;
       b.kind = kind;
@@ -638,19 +996,63 @@ export function analyzeDocument(pages, options = {}) {
       prev = b;
     }
 
+    // 読む順（XY-cut）．縦書きが本文のページは，描く順のまま．柱と余白の注は段の切れ目をふさぐので入れない（順は -1）
+    const placed = blocks.filter((b) => b.cls !== "excluded" && b.kind !== "margin");
+    const rects = placed.map((b) => ({ left: b.left, right: b.right, top: b.top, bottom: b.bottom, lines: b.lines.length }));
+    const seq = bodyRotated || !placed.length ? placed.map((_, i) => i) : xyOrder(rects, em);
+    for (const b of blocks) b.rank = -1;
+    seq.forEach((i, rank) => (placed[i].rank = rank));
+
+    // 読む順で前後を見る規則
+    const content = seq.map((i) => placed[i]);
+    const aux = (b) => b && b.cls === "auxiliary" && b.kind !== "caption";
+    for (let i = 0; i < content.length; i++) {
+      const b = content[i];
+      const P = content[i - 1];
+      const Nx = content[i + 1];
+      // 区切りのない見出し（Table 7.1 Radar …）：すぐ前か後が表・図などなら見出し
+      if (b.cls === "body" && lines[b.lines[0]].cap === "loose" && (aux(P) || aux(Nx))) {
+        b.cls = "auxiliary";
+        b.kind = "caption";
+      }
+    }
+    for (let i = 0; i < content.length; i++) {
+      const b = content[i];
+      const P = content[i - 1];
+      const Nx = content[i + 1];
+      // 続きの規則：本文の段落に挟まれ，左端がそろい，幅も同じくらいの「小さい」段落は本文（OCR の大きさの揺れ，
+      // 添え字の多い行を小さい文字で書いた PDF）．ページの初めか終わりの段落は，大きさの差が 1 割以内のときだけ
+      // （段の終わりの脚注を本文にしないため）
+      if (b.kind !== "small") continue;
+      const aligned = (o) => o && o.cls === "body" && Math.abs(o.left - b.left) <= em && Math.abs(o.right - b.right) <= 2 * em;
+      const between = P?.cls === "body" && Nx?.cls === "body";
+      const edge = (!P && Nx?.cls === "body") || (!Nx && P?.cls === "body");
+      if ((between && b.size >= 0.7 * body && (aligned(P) || aligned(Nx))) || (edge && b.size >= 0.9 * body && (aligned(P) || aligned(Nx)))) {
+        b.cls = "body";
+        b.kind = null;
+      }
+    }
+
     // span ごとの分け方
     const n = items.length;
     const classes = new Array(n).fill("body");
     const kinds = new Array(n).fill(null);
+    const order = new Array(n).fill(-1);
     const blockOfLine = new Array(lines.length);
     blocks.forEach((b) => {
       for (const li of b.lines) blockOfLine[li] = b;
     });
     for (let li = 0; li < lines.length; li++) {
       const b = blockOfLine[li];
+      const furniture = furnitureLines[pageIndex].has(li) && b.cls !== "excluded";
       for (const k of lines[li].items) {
-        classes[k] = b.cls;
-        kinds[k] = b.kind;
+        classes[k] = furniture ? "excluded" : b.cls;
+        kinds[k] = furniture ? "furniture" : b.kind;
+        order[k] = b.rank;
+      }
+      for (const k of lines[li].ruby ?? []) {
+        classes[k] = "auxiliary";
+        kinds[k] = "ruby";
       }
     }
     for (let k = 0; k < n; k++) {
@@ -672,15 +1074,28 @@ export function analyzeDocument(pages, options = {}) {
         }
       }
     }
+
+    // 段落の始まりの行：段落の中で，前の行が文で終わり，この行が字下げされている
+    const paraStart = new Array(lines.length).fill(false);
+    for (const b of blocks) {
+      for (let j = 1; j < b.lines.length; j++) {
+        const P = lines[b.lines[j - 1]];
+        const L = lines[b.lines[j]];
+        if (L.left > b.left + 0.7 * em && L.left < b.left + 4 * em && SENTENCE_END_RE.test(P.text)) paraStart[b.lines[j]] = true;
+      }
+    }
+
     return {
       classes,
       kinds,
+      order,
+      paraStart,
       lines: prep.outLines,
       lineOf,
-      blocks: blocks.map((b) => ({ lines: b.lines, class: b.cls, kind: b.kind, size: b.size })),
+      blocks: blocks.map((b) => ({ lines: b.lines, class: b.cls, kind: b.kind, size: b.size, rank: b.rank })),
     };
   });
-  return { bodySize, pages: outPages };
+  return { bodySize, hyphenWords, pages: outPages };
 }
 
 /**
@@ -688,6 +1103,7 @@ export function analyzeDocument(pages, options = {}) {
  */
 function mathFragment(b, prev, pitch) {
   if (!prev || prev.cls !== "body" || b.lines.length > 2 || b.chars > 16) return false;
+  if (/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u.test(b.text)) return false; // 日本語の語は数式でない
   const mid = (b.top + b.bottom) / 2;
   if (mid < prev.top - 0.8 * pitch || mid > prev.bottom + 0.8 * pitch) return false;
   return b.right >= prev.left && b.left <= prev.right;
@@ -703,6 +1119,11 @@ const KIND_GROUP = {
   caption: "caption",
   small: "small",
   rotated: "small",
+  figure: "small",
+  table: "small",
+  note: "small",
+  margin: "margin",
+  ruby: "ruby",
 };
 
 /**
@@ -710,11 +1131,15 @@ const KIND_GROUP = {
  * 1. 範囲の初めと終わりにある除外（柱・ページ番号など）は，本文の切れ端が一つでも残るなら落とす．
  * 2. そのうえで，残りの初めと終わり（空白でないもの）がどちらも本文なら，間の本文でないものをすべて落とす．
  *    そうでなければ（キャプションだけを選んだ，キャプションの中で終わったなど），1 で落とした両端のほかは残す．
+ * 3. ルビは，ほかに残るものがあれば，どこにあっても落とす．
+ * 4. 初めと終わりの本文の切れ端の読む順（ページ，段落の読む順）の外にあるものを落とす（段の後に描かれた見出しなど）．
+ *    残りは読む順に並べた順番（order）も返す．
  * 設定で外した種類は本文として扱う．分け方の分からないもの（ページを読んでいない，spanIndex が -1）も本文とする．
  * @param {{pageIndex: number, spanIndex: number, text: string}[]} pieces 選んだ順
  * @param {ReturnType<typeof analyzeDocument> | null} analysis
- * @param {{skipFurniture?: boolean, skipCaptions?: boolean, skipSmallText?: boolean}} [options]
- * @returns {{keep: boolean[], removed: {kind: "furniture"|"caption"|"small", pageIndex: number, text: string}[]}}
+ * @param {{skipFurniture?: boolean, skipCaptions?: boolean, skipSmallText?: boolean, skipMarginNotes?: boolean, skipRuby?: boolean}} [options]
+ * @returns {{keep: boolean[], order: number[], removed: {kind: string, pageIndex: number, text: string}[]}}
+ *   order は，残した切れ端の番号を読む順に並べたもの．
  */
 export function filterSelection(pieces, analysis, options = {}) {
   const opt = { ...DEFAULT_OPTIONS, ...(options || {}) };
@@ -724,43 +1149,76 @@ export function filterSelection(pieces, analysis, options = {}) {
     furniture: !!opt.skipFurniture,
     caption: !!opt.skipCaptions,
     small: !!opt.skipSmallText,
+    margin: !!opt.skipMarginNotes,
+    ruby: !!opt.skipRuby,
   };
-  const cat = new Array(n); // "body" | "furniture" | "caption" | "small"
+  const cat = new Array(n); // "body" | "furniture" | "caption" | "small" | "margin" | "ruby"
   const blank = new Array(n);
+  const rank = new Array(n); // 読む順（ページ × 大きな数 ＋ 段落の順．分からなければ null）
   for (let i = 0; i < n; i++) {
     const p = list[i] || {};
     blank[i] = isBlank(String(p.text ?? ""));
     const pa = analysis?.pages?.[p.pageIndex];
     let group = null;
+    rank[i] = null;
     if (pa && Number.isInteger(p.spanIndex) && p.spanIndex >= 0) {
       const kind = pa.kinds?.[p.spanIndex];
       if (kind) group = KIND_GROUP[kind] ?? null;
       else if (pa.classes?.[p.spanIndex] === "excluded") group = "furniture";
       else if (pa.classes?.[p.spanIndex] === "auxiliary") group = "small";
+      const o = pa.order?.[p.spanIndex];
+      if (Number.isInteger(o) && o >= 0) rank[i] = p.pageIndex * 1e6 + o;
     }
     cat[i] = group && enabled[group] ? group : "body";
   }
 
   const keep = new Array(n).fill(true);
+  const why = new Array(n).fill(null); // 落とした理由（種類）
+  const drop = (i, kind) => {
+    keep[i] = false;
+    why[i] = kind;
+  };
   // 1. 両端の除外を落とす
   let s = -1;
   let e = -1;
-  for (let i = 0; i < n; i++) if (!blank[i] && cat[i] !== "furniture") { s = i; break; }
-  for (let i = n - 1; i >= 0; i--) if (!blank[i] && cat[i] !== "furniture") { e = i; break; }
+  for (let i = 0; i < n; i++) if (!blank[i] && cat[i] !== "furniture" && cat[i] !== "ruby") { s = i; break; }
+  for (let i = n - 1; i >= 0; i--) if (!blank[i] && cat[i] !== "furniture" && cat[i] !== "ruby") { e = i; break; }
   let hasBody = false;
   if (s >= 0) for (let i = s; i <= e; i++) if (!blank[i] && cat[i] === "body") { hasBody = true; break; }
   if (hasBody) {
     let side = false;
     for (let i = 0; i < s; i++) if (cat[i] === "furniture") side = true;
-    if (side) for (let i = 0; i < s; i++) keep[i] = false;
+    if (side) for (let i = 0; i < s; i++) drop(i, cat[i] === "body" ? null : cat[i]);
     side = false;
     for (let i = e + 1; i < n; i++) if (cat[i] === "furniture") side = true;
-    if (side) for (let i = e + 1; i < n; i++) keep[i] = false;
+    if (side) for (let i = e + 1; i < n; i++) drop(i, cat[i] === "body" ? null : cat[i]);
     // 2. 初めと終わりが本文なら，間の本文でないものを落とす
     if (cat[s] === "body" && cat[e] === "body") {
-      for (let i = s + 1; i < e; i++) if (cat[i] !== "body") keep[i] = false;
+      for (let i = s + 1; i < e; i++) if (cat[i] !== "body") drop(i, cat[i]);
+      // 4. 読む順の外にあるもの
+      const lo = rank[s];
+      const hi = rank[e];
+      if (lo !== null && hi !== null && lo <= hi) {
+        for (let i = s + 1; i < e; i++) {
+          if (!keep[i] || blank[i] || rank[i] === null) continue;
+          if (rank[i] < lo || rank[i] > hi) drop(i, cat[i] === "body" ? "order" : cat[i]);
+        }
+      }
     }
   }
+  // 3. ルビ
+  if (s >= 0) for (let i = 0; i < n; i++) if (cat[i] === "ruby" && keep[i]) drop(i, "ruby");
+
+  // 残したものを読む順に並べる（順の分からない切れ端は直前のものに付ける．同じ順なら選んだ順のまま）
+  const kept = [];
+  let last = -Infinity;
+  for (let i = 0; i < n; i++) {
+    if (!keep[i]) continue;
+    const r = rank[i] ?? last;
+    kept.push({ i, r });
+    if (rank[i] !== null && !blank[i]) last = rank[i];
+  }
+  const order = [...kept].sort((a, b) => a.r - b.r || a.i - b.i).map((x) => x.i);
 
   // 落としたものを，種類とページの続く範囲ごとにまとめる
   const removed = [];
@@ -771,7 +1229,7 @@ export function filterSelection(pieces, analysis, options = {}) {
       if (!blank[i]) run = null; // 残した空白は，まとまりを切らない
       continue;
     }
-    const kind = cat[i] === "body" ? null : cat[i];
+    const kind = why[i];
     if (run && (kind === null || (run.kind === kind && run.pageIndex === p.pageIndex))) {
       run.parts.push(p);
       continue;
@@ -782,6 +1240,7 @@ export function filterSelection(pieces, analysis, options = {}) {
   }
   return {
     keep,
+    order,
     removed: removed.map((r) => ({ kind: r.kind, pageIndex: r.pageIndex, text: joinParts(r.parts, analysis) })),
   };
 }
@@ -807,4 +1266,17 @@ function joinParts(parts, analysis) {
     prev = p;
   }
   return collapse(text);
+}
+
+/**
+ * 行末のハイフンで切れた語のうち，文書の中で行の途中にもハイフン付きで書かれている語（short-wavelength）は，
+ * ハイフンを残してつなぐ（改行を消す）．それ以外はそのまま（原文の整形で，ハイフンを消してつなぐ）．
+ * @param {string} text
+ * @param {Set<string> | null | undefined} words analyzeDocument の hyphenWords
+ */
+export function keepHyphens(text, words) {
+  if (!words?.size) return text;
+  return String(text).replace(/(\p{L}+)([-‐])[ \t]*\n[ \t]*(\p{L}+)/gu, (m, a, h, b) =>
+    words.has(`${a}-${b}`.toLowerCase()) ? `${a}${h}${b}` : m,
+  );
 }

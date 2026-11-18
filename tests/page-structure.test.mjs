@@ -7,6 +7,7 @@ import {
   endsWithEquationNumber,
   filterSelection,
   isPageNumberText,
+  keepHyphens,
   matchCaption,
 } from "../web/pdfjs/page-structure.mjs";
 
@@ -45,6 +46,8 @@ test("DEFAULT_OPTIONS", () => {
     skipCaptions: true,
     skipSmallText: true,
     sizeTolerance: 6,
+    skipMarginNotes: true,
+    skipRuby: true,
   });
 });
 
@@ -338,7 +341,19 @@ test("isPageNumberText・endsWithEquationNumber", () => {
 });
 
 // --- 選んだ範囲の絞り込み ---
-const CLASS_OF = { artifact: "excluded", furniture: "excluded", pageNumber: "excluded", caption: "auxiliary", small: "auxiliary", rotated: "auxiliary" };
+const CLASS_OF = {
+  artifact: "excluded",
+  furniture: "excluded",
+  pageNumber: "excluded",
+  caption: "auxiliary",
+  small: "auxiliary",
+  rotated: "auxiliary",
+  margin: "auxiliary",
+  figure: "auxiliary",
+  table: "auxiliary",
+  note: "auxiliary",
+  ruby: "auxiliary",
+};
 /** ページごとの kinds（span の順）から，analyzeDocument の結果に似たものを作る．lines は span ごとの行の番号． */
 const mock = (...pagesSpec) => ({
   bodySize: 10,
@@ -429,7 +444,7 @@ test("filterSelection：分け方の分からないもの（ページ未解析�
   const r = filterSelection([piece(0, 3, "unknown"), piece(1, -1, "no span"), piece(1, 1, "Fig. 1"), piece(1, 0, "x")], a);
   assert.deepEqual(r.keep, [true, true, false, true]);
   assert.deepEqual(filterSelection([piece(0, 0, "a")], null).keep, [true]);
-  assert.deepEqual(filterSelection([], a), { keep: [], removed: [] });
+  assert.deepEqual(filterSelection([], a), { keep: [], order: [], removed: [] });
 });
 
 test("filterSelection：ページをまたぐハイフンの語（transla- … tion）は両側を残す", () => {
@@ -481,4 +496,128 @@ test("数百ページでも速い", () => {
   const warm = performance.now() - t1;
   assert.ok(cold < 2000, `cold ${cold} ms`);
   assert.ok(warm < 1000, `warm ${warm} ms`);
+});
+
+// ---------------------------------------------------------------------------
+// v0.3.0 の規則（実際の本・論文のテストで見つかった不具合を，小さくした入力で確かめる）
+
+const WORDS = ["Aardvark", "Bison", "Cheetah", "Dolphin", "Eagle", "Falcon", "Gorilla", "Hyena", "Iguana", "Jaguar", "Koala", "Lemur"];
+const SHORT = "the quick brown fox jumps over the lazy dog again"; // 49 文字（幅 245）
+
+test("柱：章ごとに変わる柱（全ページの 25% に満たない）も，近くのページで繰り返せば柱", () => {
+  const titles = ["Alpha Methods Overview", "Beta Results Summary", "Gamma Theory Basics", "Delta Field Notes", "Epsilon Data Sets"];
+  const doc = furnitureDoc(40, { header: (i) => titles[Math.floor(i / 8)] });
+  const r = analyzeDocument(doc);
+  for (const i of [0, 9, 20, 39]) assert.deepEqual(kindOf(r, i, doc[i], titles[Math.floor(i / 8)]), ["excluded", "furniture"], `p${i}`);
+});
+
+test("柱：ページごとに違う見出しでも，行の頭の数がページの順に 1 ずつ増えれば柱（「210 7. GRADIENT DESCENT」）", () => {
+  const doc = furnitureDoc(10, { header: (i) => `${210 + i} ${WORDS[i]} chapter heading`, number: () => "" });
+  const r = analyzeDocument(doc);
+  for (const i of [0, 4, 9]) assert.deepEqual(kindOf(r, i, doc[i], `${210 + i} ${WORDS[i]} chapter heading`), ["excluded", "furniture"], `p${i}`);
+});
+
+test("柱：見出しとページ番号が離れて並ぶ（「7.1. Error Surfaces      211」）と，見出しも柱", () => {
+  const doc = Array.from({ length: 6 }, (_, i) => page([t(`${WORDS[i]} Section Title`, 72, 750), t(String(211 + i), 520, 750), ...para(30)]));
+  const r = analyzeDocument(doc);
+  assert.deepEqual(kindOf(r, 2, doc[2], `${WORDS[2]} Section Title`), ["excluded", "furniture"]);
+  assert.deepEqual(kindOf(r, 2, doc[2], "213"), ["excluded", "pageNumber"]);
+});
+
+test("ページ番号：「― 690 ―」の形も，帯の中ならページ番号", () => {
+  assert.ok(isPageNumberText("― 690 ―"));
+  assert.ok(isPageNumberText("‐ 12 ‐"));
+});
+
+test("柱：DOI の行は飾り", () => {
+  const pg = page([t("DOI: 10.4294/zisin.2016-21", 72, 760), ...para(30)]);
+  const r = analyzeDocument([pg]);
+  assert.deepEqual(kindOf(r, 0, pg, "DOI: 10.4294/zisin.2016-21"), ["excluded", "furniture"]);
+});
+
+test("余白の注：本文と同じ高さでも，本文の枠の外（左の余白）にあれば margin．本文の行とは別の行", () => {
+  const mk = () => {
+    const body = para(30, { x: 150, text: SHORT });
+    return page([...body.slice(0, 5), t("Section 6.4", 40, 680 - 4 * 12), ...body.slice(5)]);
+  };
+  const doc = [mk(), mk()];
+  const r = analyzeDocument(doc);
+  assert.deepEqual(kindOf(r, 0, doc[0], "Section 6.4"), ["auxiliary", "margin"]);
+  const p = r.pages[0];
+  const k = spanOf(doc[0], "Section 6.4");
+  assert.notEqual(p.lineOf[k], p.lineOf[k - 1]); // 前の本文の行と同じ行にしない
+  assert.equal(p.classes[k - 1], "body");
+});
+
+test("読む順（XY-cut）：段の後に描かれた，段をまたぐ見出しは，段またぎの選択から落とし，段の順に並べる", () => {
+  const col = (x, y, n, tag) => Array.from({ length: n }, (_, i) => t(`${tag} line ${i} of the column text here`, x, y - i * 12));
+  // 描く順：左上の段 → 左下の段 → 見出し → 右上の段 → 右下の段（見出しは上下の段の間，段の境をまたいで置かれる）
+  const items = [...col(72, 700, 5, "LT"), ...col(72, 540, 5, "LB"), t("Discussion and Conclusions Section", 200, 600, 10), ...col(330, 700, 5, "RT"), ...col(330, 540, 5, "RB")];
+  const pg = page(items);
+  const r = analyzeDocument([pg]);
+  const p = r.pages[0];
+  const idx = (s) => spanOf(pg, s);
+  // 左上の最後の行から，右上の最初の行までを選ぶ（描く順では，間に左下の段と見出しが入る）
+  const from = idx("LT line 4 of the column text here");
+  const to = idx("RT line 0 of the column text here");
+  const pieces = [];
+  for (let k = from; k <= to; k++) pieces.push(piece(0, k, pg.items.filter((it) => it.str)[k].str));
+  const f = filterSelection(pieces, r);
+  const kept = f.order.map((i) => pieces[i].text);
+  assert.deepEqual(kept, ["LT line 4 of the column text here", "RT line 0 of the column text here"]);
+  assert.ok(f.removed.some((x) => /Discussion/.test(x.text)));
+  assert.ok(p.order[idx("LT line 0 of the column text here")] < p.order[idx("RT line 0 of the column text here")]);
+});
+
+test("ルビ：行のすぐ上の小さい文字は，行を切らずに ruby．選択の端にあっても落とす", () => {
+  const items = [...para(10), t("神", 72, 500), t("かみ", 72, 509, 5), t("城", 82, 500), t("しろ", 82, 509, 5), t("層の上に", 92, 500)];
+  const pg = page(items);
+  const r = analyzeDocument([pg]);
+  assert.deepEqual(kindOf(r, 0, pg, "かみ"), ["auxiliary", "ruby"]);
+  const p = r.pages[0];
+  assert.equal(p.lineOf[spanOf(pg, "神")], p.lineOf[spanOf(pg, "層の上に")]);
+  const k0 = spanOf(pg, "神");
+  const pieces = [0, 1, 2, 3, 4].map((d) => piece(0, k0 + d, items[10 + d].str));
+  const f = filterSelection(pieces, r);
+  assert.deepEqual(f.keep, [true, false, true, false, true]);
+});
+
+test("続きの規則：本文に挟まれ，左端と幅がそろう少し小さい段落は本文（OCR の大きさの揺れ）", () => {
+  // 両端そろえの段落なので，小さい文字の行も幅は同じ（文字数を増やして幅 475 にする）
+  const wide = (LOREM + " " + LOREM).slice(0, 112);
+  const pg = page([...para(6, { y: 700 }), ...para(3, { y: 620, fs: 9.2, text: wide.slice(0, 103), pitch: 11 }), ...para(6, { y: 580 })]);
+  const r = analyzeDocument([pg]);
+  const k = pg.items.findIndex((it) => it.transform[0] === 9.2);
+  assert.equal(r.pages[0].classes[k], "body");
+});
+
+test("表：同じ高さに 3 つ以上の欄が並び，数字の多い行が続く段落は table（本文と同じ大きさでも）", () => {
+  const row = (y, a, b, c, d) => [t(a, 72, y), t(b, 105, y), t(c, 140, y), t(d, 165, y)];
+  const pg = page([...para(6, { y: 700 }), ...row(610, "Ice", "8.8", "3", "60.7"), ...row(598, "Salt", "9.5", "5", "98.3"), ...row(586, "Rock", "6.7", "6", "268"), ...para(6, { y: 540 })]);
+  const r = analyzeDocument([pg]);
+  assert.deepEqual(kindOf(r, 0, pg, "60.7"), ["auxiliary", "table"]);
+  assert.deepEqual(kindOf(r, 0, pg, LOREM), ["body", null]);
+});
+
+test("区切りのない見出し（Table 7.1 Radar …）も，すぐ後が表なら caption", () => {
+  const row = (y, a, b, c, d) => [t(a, 72, y), t(b, 105, y), t(c, 140, y), t(d, 165, y)];
+  const pg = page([...para(6, { y: 700 }), t("Table 7.1 Radar wavelength for commonly used satellites", 72, 615), ...row(595, "Ice", "8.8", "3", "60.7"), ...row(583, "Salt", "9.5", "5", "98.3"), ...row(571, "Rock", "6.7", "6", "268"), ...para(6, { y: 530 })]);
+  const r = analyzeDocument([pg]);
+  assert.deepEqual(kindOf(r, 0, pg, "Table 7.1 Radar wavelength for commonly used satellites"), ["auxiliary", "caption"]);
+});
+
+test("段落の始まり：前の行が文で終わり，字下げされた行は paraStart", () => {
+  const pg = page([...para(3, { y: 700, text: "first paragraph text ends here." }), t("Second paragraph starts with an indent", 90, 664), ...para(2, { y: 652 })]);
+  const r = analyzeDocument([pg]);
+  const p = r.pages[0];
+  assert.equal(p.paraStart[p.lineOf[spanOf(pg, "Second paragraph starts with an indent")]], true);
+  assert.equal(p.paraStart[1], false);
+});
+
+test("keepHyphens：文書の中にハイフン付きで書かれた語は，行末で切れてもハイフンを残す", () => {
+  const pg = page([t("the short-wavelength part of the signal", 72, 700), ...para(5, { y: 688 })]);
+  const r = analyzeDocument([pg]);
+  assert.ok(r.hyphenWords.has("short-wavelength"));
+  assert.equal(keepHyphens("with the short-\nwavelength and transla-\ntion", r.hyphenWords), "with the short-wavelength and transla-\ntion");
+  assert.equal(keepHyphens("a-\nb", null), "a-\nb");
 });

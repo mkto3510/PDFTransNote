@@ -51,6 +51,17 @@ export async function putPdf(url, data, force = false) {
   return { status: res.status, ok: res.ok, info };
 }
 
+/** 「名前を付けて保存」：ダイアログが登録した行き先（トークン）に書く．{status, ok, info} を返す． */
+export async function putSaveAs(token, data) {
+  const res = await fetch(`/save-as/${encodeURIComponent(token)}`, {
+    method: "PUT",
+    headers: { ...AUTH, "Content-Type": "application/pdf" },
+    body: data,
+  });
+  const info = await res.json().catch(() => ({}));
+  return { status: res.status, ok: res.ok, info };
+}
+
 // ---------------------------------------------------------------------------
 // デスクトップ（pywebview＋Edge WebView2）
 // ---------------------------------------------------------------------------
@@ -82,6 +93,14 @@ export async function openDropped(files) {
   const api = await desktop;
   await new Promise((r) => setTimeout(r, 50));
   return api ? await api.open_dropped([...files].map((f) => f.name)) : 0;
+}
+
+/**
+ * 「名前を付けて保存」のダイアログ（デスクトップのとき）．docToken は開いている文書のトークン．
+ * 選んだ行き先の書き込み用のトークンを返す（取り消し，またはデスクトップでなければ null）．
+ */
+export async function saveAsDialog(docToken) {
+  return (await (await desktop)?.save_as_dialog(docToken)) ?? null;
 }
 
 /** 閉じる前の確認に使う「変更あり」を知らせる． */

@@ -36,7 +36,9 @@ if (!fs.existsSync(path.join(dist, "build", "pdf.mjs"))) {
 
 const pdfjs = await import(pathToFileURL(path.join(dist, "build", "pdf.mjs")).href);
 pdfjs.GlobalWorkerOptions.workerSrc = pathToFileURL(path.join(dist, "build", "pdf.worker.mjs")).href;
-const dirUrl = (p) => pathToFileURL(path.join(dist, p)).href + "/";
+// Node の pdf.js は CMap と標準フォントを fs.readFile で読むので，file:// の URL ではなくパスを渡す
+// （URL を渡すと読めず，埋め込みのない日本語のフォントの文字が 0 件になる）．区切りは / にする（末尾の / が要る）
+const dirUrl = (p) => path.join(dist, p).split(path.sep).join("/") + "/";
 
 const data = new Uint8Array(fs.readFileSync(args.file));
 const task = pdfjs.getDocument({

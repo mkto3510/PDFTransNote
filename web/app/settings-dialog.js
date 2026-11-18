@@ -9,6 +9,9 @@ import * as api from "./api.js";
 import { el } from "./dom.js";
 import { lang, t, tn } from "./i18n.mjs";
 
+/** ツールバーの編集のボタン（settings.py の EDITOR_TOOLS と同じ順）． */
+const TOOLS = ["comment", "highlight", "freetext", "ink", "stamp"];
+
 const langName = new Intl.DisplayNames([lang], { type: "language" });
 const langLabel = (code) => {
   try {
@@ -65,6 +68,10 @@ export class SettingsDialog {
     f.skipCaptions = el("input", { id: "tnSkipCaptions", type: "checkbox" });
     f.skipSmallText = el("input", { id: "tnSkipSmallText", type: "checkbox" });
     f.sizeTolerance = el("input", { id: "tnSizeTolerance", type: "number", min: "2", max: "30", step: "1" });
+    f.skipMarginNotes = el("input", { id: "tnSkipMarginNotes", type: "checkbox" });
+    f.skipRuby = el("input", { id: "tnSkipRuby", type: "checkbox" });
+    // ツールバーに出す編集のボタン
+    f.tools = Object.fromEntries(TOOLS.map((k) => [k, el("input", { id: `tnTool-${k}`, type: "checkbox" })]));
     f.error = el("div", { class: "tnStatus error", role: "alert" });
 
     for (const k of ["name", "endpoint", "apiKey", "model", "temperature", "systemPrompt", "prompt", "stream", "customParams"]) {
@@ -110,6 +117,18 @@ export class SettingsDialog {
           row(t("settings.backupCount"), f.backupCount, t("settings.backupCountHelp")),
           row(t("settings.uiLang"), f.uiLang, t("settings.uiLangHelp")),
         ),
+        el("h3", { text: t("settings.editorTools") }),
+        el(
+          "fieldset",
+          {},
+          el("p", { class: "tnNote", text: t("settings.editorToolsNote") }),
+          el(
+            "div",
+            { class: "tnRow" },
+            el("span"),
+            el("div", { class: "tnInline tnToolList" }, TOOLS.map((k) => el("label", { class: "tnCheck" }, f.tools[k], t(`settings.tool.${k}`)))),
+          ),
+        ),
         el("h3", { text: t("settings.selection") }),
         el(
           "fieldset",
@@ -120,6 +139,8 @@ export class SettingsDialog {
           el("div", { class: "tnRow" }, el("span"), el("label", { class: "tnCheck" }, f.skipCaptions, t("settings.skipCaptions"))),
           el("div", { class: "tnRow" }, el("span"), el("label", { class: "tnCheck" }, f.skipSmallText, t("settings.skipSmallText"))),
           row(t("settings.sizeTolerance"), f.sizeTolerance, t("settings.sizeToleranceHelp")),
+          el("div", { class: "tnRow" }, el("span"), el("label", { class: "tnCheck" }, f.skipMarginNotes, t("settings.skipMarginNotes"))),
+          el("div", { class: "tnRow" }, el("span"), el("label", { class: "tnCheck" }, f.skipRuby, t("settings.skipRuby"))),
         ),
         f.error,
         el(
@@ -167,6 +188,9 @@ export class SettingsDialog {
     f.skipCaptions.checked = !!this.draft.skipCaptions;
     f.skipSmallText.checked = !!this.draft.skipSmallText;
     f.sizeTolerance.value = this.draft.sizeTolerance;
+    f.skipMarginNotes.checked = !!this.draft.skipMarginNotes;
+    f.skipRuby.checked = !!this.draft.skipRuby;
+    for (const k of TOOLS) f.tools[k].checked = this.draft.editorTools?.[k] !== false;
     f.error.textContent = "";
     const idx = Math.max(0, this.draft.services.findIndex((s) => s.id === this.draft.activeService));
     this.renderList();
@@ -269,6 +293,9 @@ export class SettingsDialog {
       skipCaptions: f.skipCaptions.checked,
       skipSmallText: f.skipSmallText.checked,
       sizeTolerance: f.sizeTolerance.value,
+      skipMarginNotes: f.skipMarginNotes.checked,
+      skipRuby: f.skipRuby.checked,
+      editorTools: Object.fromEntries(TOOLS.map((k) => [k, f.tools[k].checked])),
     });
     f.error.textContent = "";
     try {
